@@ -1,0 +1,36 @@
+# macOS and editor metadata
+.DS_Store
+.idea/
+.vscode/
+*~
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Local benchmark data and experiment outputs
+datasets/
+data/
+result_maple_guard/
+PI/result_maple_guard/
+*.log
+
+# Temporary files
+*.tmp
+*.swp
