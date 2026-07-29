@@ -60,10 +60,6 @@ different agent in a later task.
 | Cross-agent reuse | shared memory → another agent | a benign agent reuses poisoned evidence |
 | Outcome update | task result → memory state | harmful or failed memory remains trusted |
 
-<p align="center">
-  <img src="docs/assets/figure_1_comparison.png" width="94%" alt="Physical-link and memory-link defense comparison">
-</p>
-
 ## What's here
 
 ```text
