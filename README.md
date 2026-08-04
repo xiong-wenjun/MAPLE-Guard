@@ -10,6 +10,7 @@ Defending LLM-based multi-agent systems against persistent
 </p>
 
 <p>
+  <a href="https://arxiv.org/abs/2608.00426"><img alt="arXiv: 2608.00426" src="https://img.shields.io/badge/arXiv-2608.00426-b31b1b.svg"></a>
   <img alt="Python 3.9+" src="https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white">
   <img alt="Benchmarks: 5" src="https://img.shields.io/badge/Benchmarks-5-6f42c1">
   <img alt="Topologies: star, chain, tree" src="https://img.shields.io/badge/Topologies-star%20%7C%20chain%20%7C%20tree-0a7f5a">
@@ -272,12 +273,16 @@ launching.
 If you use MAPLE-Guard in your research, please cite:
 
 ```bibtex
-@misc{maple_guard2026,
+@misc{xiong2026mapleguard,
   title  = {MAPLE-Guard: Memory-Aware Link Enforcement Against
             Memory-Link Poisoning in Multi-Agent Systems},
-  author = {Anonymous Authors},
+  author = {Wenjun Xiong and Yijin Zhou and Jiaqian Wang and Shangding Gu and
+            Bo Tang and Zhiyu Li and Feiyu Xiong and Ying Wen and Muning Wen},
   year   = {2026},
-  note   = {Code and experiments for MAPLE-Guard}
+  eprint = {2608.00426},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.MA},
+  url    = {https://arxiv.org/abs/2608.00426}
 }
 ```
 
