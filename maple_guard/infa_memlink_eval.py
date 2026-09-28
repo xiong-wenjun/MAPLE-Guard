@@ -24,6 +24,14 @@ try:
 except Exception:  # pragma: no cover
     yaml = None
 
+# Direct script invocation must resolve this checkout's package.
+_LOCAL_ROOT = str(Path(__file__).resolve().parents[1])
+if _LOCAL_ROOT not in sys.path:
+    sys.path.insert(0, _LOCAL_ROOT)
+from evaluate.defense_methods.full_runtime import (
+    FULL_METHODS, add_full_baseline_args, current_runtime, scoped_baseline, public_config,
+)
+
 OFFICIAL_COMMUNICATION_METHODS = {
     "gsafeguard",
     "infa_guard",
@@ -178,6 +186,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stream-decisions", action=argparse.BooleanOptionalAction, default=bool(cfg_get(cfg, "stream_decisions", True)))
     parser.add_argument("--stream-memories", action=argparse.BooleanOptionalAction, default=bool(cfg_get(cfg, "stream_memories", True)))
     parser.add_argument("--write-final-json", action=argparse.BooleanOptionalAction, default=bool(cfg_get(cfg, "write_final_json", True)))
+    add_full_baseline_args(parser, cfg)
     args = parser.parse_args()
     if not args.attack_mode:
         parser.error("--attack-mode is required, either directly or via --config")
@@ -426,6 +435,8 @@ def regen_prompt(
         per_peer_limit = int(getattr(args, "ta_peer_message_max_chars", 700))
         total_limit = int(getattr(args, "ta_observation_max_chars", 5200))
         for src in incoming:
+            if method in FULL_METHODS and int(src) not in last_responses:
+                continue
             message = last_responses.get(int(src), "")
             if communication_guard_enabled(method, args):
                 guarded, decision = guard_incoming_message(int(src), idx, message, message, method, args, attacker_idxes)
@@ -446,6 +457,8 @@ def regen_prompt(
 
     views: Dict[str, Any] = {}
     for src in incoming:
+        if method in FULL_METHODS and int(src) not in parsed:
+            continue
         source_parsed = parsed.get(int(src), {})
         if communication_guard_enabled(method, args):
             guarded, decision = guard_incoming_message(
@@ -961,6 +974,7 @@ def _progress_line(method: str, task_idx: int, total: int, progress: Dict[str, A
     )
 
 
+@scoped_baseline
 def run_one_method(ep: Any, records: Sequence[Dict[str, Any]], method: str, args: argparse.Namespace) -> Dict[str, Any]:
     rng = random.Random(args.seed)
     private_memories: Dict[int, List[Any]] = {}
@@ -1000,6 +1014,9 @@ def run_one_method(ep: Any, records: Sequence[Dict[str, Any]], method: str, args
         d = deepcopy(original)
         d["adj_matrix"] = getattr(d["adj_matrix"], "tolist", lambda: d["adj_matrix"])()
         task = task_for_record(ep, d, task_idx, args)
+        runtime = current_runtime(method)
+        if runtime is not None:
+            runtime.begin_task(task.task_id, task.question)
         messages: Dict[int, List[Dict[str, str]]] = {
             i: [{"role": "system", "content": d["system_prompts"][i]}] for i in range(args.agents)
         }
@@ -1013,13 +1030,32 @@ def run_one_method(ep: Any, records: Sequence[Dict[str, Any]], method: str, args
             round_parsed: Dict[int, Any] = {}
             round_comm_decisions: List[Dict[str, Any]] = []
             for agent_id in range(args.agents):
+                if runtime is not None and not runtime.active(agent_id):
+                    continue
+                live_record = d
+                if runtime is not None and agent_id in runtime.replacements:
+                    live_record = dict(d)
+                    live_record["attacker_idxes"] = [i for i in d["attacker_idxes"] if int(i) != agent_id]
                 if round_idx == 0:
-                    base_prompt = first_prompt(d, agent_id, args, rng, method)
+                    base_prompt = first_prompt(live_record, agent_id, args, rng, method)
                 else:
-                    base_prompt = regen_prompt(d, agent_id, last_responses, parsed, args, method, round_comm_decisions)
+                    visible_responses = last_responses
+                    visible_parsed = parsed
+                    if runtime is not None:
+                        visible_responses = {}
+                        for sender, text in last_responses.items():
+                            if sender != agent_id and not d["adj_matrix"][sender][agent_id]:
+                                continue
+                            routed = runtime.route(text, sender, agent_id)
+                            if routed is not None:
+                                visible_responses[sender] = routed
+                        visible_parsed = {sender: (text if args.attack_mode == "TA" else parse_pi_response(text))
+                                          for sender, text in visible_responses.items()}
+                    base_prompt = regen_prompt(live_record, agent_id, visible_responses, visible_parsed, args, method, round_comm_decisions)
 
                 mem_context, read_decisions, broker_decisions, selected_ids = add_memory_to_prompt(
-                    ep, task, agent_id, method, args, private_memories, shared_memories, memory_backend
+                    ep, task, runtime.memory_owner(agent_id) if runtime else agent_id,
+                    method, args, private_memories, shared_memories, memory_backend
                 )
                 stats.ingest_retrieval(read_decisions, task_idx=task_idx, round_idx=round_idx, agent_id=agent_id)
                 stats.ingest_defense(broker_decisions, task_idx=task_idx, round_idx=round_idx, agent_id=agent_id)
@@ -1030,15 +1066,19 @@ def run_one_method(ep: Any, records: Sequence[Dict[str, Any]], method: str, args
                     benign_response_slots += 1
 
                 prompt = f"{mem_context}\n\nCurrent physical-topology prompt:\n{base_prompt}"
-                response = ep.call_chat(
-                    args.chat_base_url,
-                    args.chat_model,
-                    messages[agent_id] + [{"role": "user", "content": prompt}],
-                    temperature=0.0,
-                    timeout=180,
-                    max_tokens=args.max_tokens,
-                    chat_template_kwargs=chat_kwargs,
-                )
+                model_messages = messages[agent_id] + [{"role":"user", "content":prompt}]
+                def generate(model_messages):
+                    return ep.call_chat(
+                        args.chat_base_url, args.chat_model, model_messages, temperature=0.0,
+                        timeout=180, max_tokens=args.max_tokens, chat_template_kwargs=chat_kwargs,
+                    )
+                # Keep task/tool context runner-side; defenses never inspect private roles.
+                if runtime is not None:
+                    if round_idx == 0:
+                        runtime.register_task_context(agent_id, [model_messages[0], {"role":"user", "content":base_prompt}])
+                    response = runtime.generate(agent_id, [model_messages[0], model_messages[-1]], generate)
+                else:
+                    response = generate(model_messages)
                 history_prompt = compact_middle(prompt, int(getattr(args, "chat_history_max_chars", 1200))) if args.attack_mode == "TA" else prompt
                 history_response = compact_middle(response, int(getattr(args, "chat_history_max_chars", 1200))) if args.attack_mode == "TA" else response
                 messages[agent_id].append({"role": "user", "content": history_prompt})
@@ -1240,7 +1280,7 @@ def main() -> None:
     records = load_infa_cases(args)
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
     combined_summary: Dict[str, Any] = {
-        "config": vars(args),
+        "config": public_config(args),
         "methods": {},
     }
     for method in methods:

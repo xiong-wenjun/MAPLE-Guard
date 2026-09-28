@@ -288,6 +288,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-file", default=None)
     p.add_argument("--log-every", type=int, default=int(cfg_get(cfg, "experiment.log_every", 5)))
     p.add_argument("--seed", type=int, default=int(cfg_get(cfg, "experiment.seed", 42)))
+    ep.add_full_baseline_args(p, cfg)
     args = p.parse_args()
     args.method_explicit = any(arg == "--method" or arg.startswith("--method=") for arg in sys.argv[1:])
     return args
@@ -1440,6 +1441,7 @@ def compute_benign_round_effects(
     return effects
 
 
+@ep.scoped_baseline
 def run_stream_task(
     trace_id: str,
     task_index: int,

@@ -549,6 +549,7 @@ class MemRLMemoryBackend:
             "taint": str(entry.taint),
             "status": "activated",
             "maple_guard_status": str(entry.status),
+            "baseline_metadata": dict(getattr(entry, "baseline_metadata", {})),
             "parents": list(entry.parents),
             "q_value": float(entry.utility_q),
             "success": bool(success),
@@ -586,6 +587,7 @@ class MemRLMemoryBackend:
                 content_hazard=float(md.get("content_hazard", 0.0) or 0.0),
                 taint=str(md.get("taint") or "unverified"),
                 status=str(md.get("maple_guard_status") or md.get("status") or "active").replace("activated", "active"),
+                baseline_metadata=dict(md.get("baseline_metadata") or {}),
                 parents=_as_str_list(md.get("parents")),
             )
             self.entries[maple_guard_id] = entry
