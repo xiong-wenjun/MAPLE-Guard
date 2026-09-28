@@ -27,7 +27,7 @@ class UsageTests(unittest.TestCase):
             log=Path(folder)/"calls.jsonl"
             with patch.object(requests.sessions.Session,"send",return_value=self.response("length")):
                 install_metrics(str(log),True)
-                with self.assertRaisesRegex(RuntimeError,"token limit"):
+                with self.assertRaisesRegex(SystemExit,"token limit"):
                     requests.post("http://service/v1/chat/completions",json={"model":"m"})
             self.assertEqual(json.loads(log.read_text())["finish_reasons"],["length"])
     def test_transport_failure_keeps_original_exception(self):
@@ -38,3 +38,15 @@ class UsageTests(unittest.TestCase):
                 with self.assertRaises(requests.ConnectionError):
                     requests.post("http://service/v1/embeddings",json={"model":"m","input":["private"]})
             self.assertEqual(json.loads(log.read_text())["error_type"],"ConnectionError")
+
+    def test_auxiliary_exception_fallback_cannot_swallow_invalid_model_response(self):
+        with tempfile.TemporaryDirectory() as folder:
+            log=Path(folder)/"calls.jsonl"
+            with patch.object(requests.sessions.Session,"send",return_value=self.response("length")):
+                install_metrics(str(log),True)
+                with self.assertRaises(SystemExit):
+                    try:
+                        requests.post("http://service/v1/chat/completions",json={"model":"m"})
+                    except Exception:
+                        self.fail("Invalid generation was swallowed by a helper fallback")
+            self.assertTrue(json.loads(log.read_text())["invalid_for_benchmark"])

@@ -2108,6 +2108,8 @@ def call_chat(
         payload["stop"] = stops
     if chat_template_kwargs:
         payload["chat_template_kwargs"] = chat_template_kwargs
+    elif os.getenv("CHAT_DISABLE_THINKING") == "1":
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     last_error = None
     for attempt in range(8):
         try:

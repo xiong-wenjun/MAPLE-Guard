@@ -8,7 +8,7 @@ import sys
 import time
 from urllib.parse import urlsplit
 
-class BenchmarkResponseError(RuntimeError):
+class BenchmarkResponseError(SystemExit):
     fatal_for_benchmark=True
 
 def install_metrics(path, fail_on_truncation=False):
@@ -41,6 +41,7 @@ def install_metrics(path, fail_on_truncation=False):
                 truncated=any(r=="length" for r in record["finish_reasons"])
                 missing_final=parsed.path.endswith("/chat/completions") and response.status_code==200 and (not choices or not all(record["final_content_present"]))
                 invalid_response=truncated or missing_final
+                record["invalid_for_benchmark"]=invalid_response
             return response
         except Exception as exc:
             record["error_type"]=type(exc).__name__

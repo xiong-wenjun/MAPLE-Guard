@@ -39,6 +39,7 @@ class MatrixTests(unittest.TestCase):
             self.assertFalse(args.exclude_attackers_from_final_vote)
             self.assertEqual(args.full_judge_base_url,"http://judge/v1")
             self.assertTrue(args.benchmark_bundle)
+            self.assertEqual(args.chat_max_tokens,512)
     def test_no_credentials_in_command(self):
         job=build_job(self.args(),"maple_guard",42,self.services())
         self.assertNotIn("SECRET"," ".join(job["command"]))

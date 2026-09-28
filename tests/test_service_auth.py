@@ -49,3 +49,9 @@ class AuthenticationTests(unittest.TestCase):
         with patch.dict(os.environ,{"EMBED_API_KEY":"embed-key","CHAT_API_KEY":"chat-key"},clear=True), patch.object(ep.requests,"post",return_value=response) as post:
             self.assertEqual(ep.remote_embedding("question","http://embedding/v1","embed-model"),[1.0,0.0])
             self.assertEqual(post.call_args.kwargs["headers"]["Authorization"],"Bearer embed-key")
+
+    def test_auxiliary_chat_inherits_disabled_thinking_protocol(self):
+        response=self.response({"choices":[{"message":{"content":"summary"}}]})
+        with patch.dict(os.environ,{"CHAT_DISABLE_THINKING":"1"},clear=True), patch.object(ep.requests,"post",return_value=response) as post:
+            ep.call_chat("http://task/v1","qwen",[])
+            self.assertEqual(post.call_args.kwargs["json"]["chat_template_kwargs"],{"enable_thinking":False})

@@ -107,7 +107,7 @@ def build_job(args, method, seed, services):
         cmd += ["--strict-comparison","--peer-communication","--no-exclude-attackers-from-final-vote",
                 "--no-enable-causal-mir","--benign-shared-promotion-policy","accepted_retrieved_private",
                 "--memory-topology","brokered-shared","--top-k-memory","3","--disable-chat-thinking",
-                "--asr-metric","target_hit"]
+                "--asr-metric","target_hit","--chat-max-tokens","512"]
     if args.phase=="smoke": cmd+=["--warmup-tasks","0","--malicious-activation-rate","0.25"]
     return {"run_id":run_id,"method":method,"table_role":"main" if method in MAIN else ("identity_audit" if method in IDENTITY_AUDIT else "mechanism"),
             "seed":seed,"phase":args.phase,"profile":args.profile,"directory":str(run_dir),

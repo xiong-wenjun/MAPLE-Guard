@@ -34,11 +34,13 @@ lifecycle and feedback tests to LongMemEval before a cross-domain claim.
 - Qwen3.5 is the fixed guard/judge even for Gemma task generation. Native GNN
   encoders retain their required MiniLM model; MAS memory embeddings use the
   shared Qwen embedding service.
-- Strict calls disable thinking consistently for agents and memory summaries.
+- Strict calls disable thinking consistently for agents, memory summaries and auxiliary generation.
+  Their common ordinary-generation budget is512 tokens (the paper-code bridge retains128).
   In the actual Qwen service, the original128-token/default-thinking probe
   truncated without final content. Such responses must not count as valid
   main-table results. The journal records finish reasons, usage and latency;
-  strict truncation or missing final content fails the run.
+  strict truncation or missing final content immediately exits the run, even if
+  a legacy auxiliary helper would otherwise catch the error and fall back.
 - Bundled specs are used as provided, without importing ground-truth difficulty
   labels. This differs from the original native-directory adapter's question
   rendering. Dataset SHA and selected IDs are saved. The source manifest DB
