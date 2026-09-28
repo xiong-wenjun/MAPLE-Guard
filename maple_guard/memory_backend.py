@@ -102,8 +102,12 @@ class OpenAICompatibleLLM(BaseLLM):
         return out or [text[:128]]
 
 
+def _strict_backend(args, method=""):
+    from evaluate.defense_methods.full_runtime import FULL_METHODS, MEMORY_METHODS
+    return bool(getattr(args,"strict_comparison",False)) or (method or getattr(args,"method","")) in (*FULL_METHODS,*MEMORY_METHODS)
+
 class OpenAICompatibleEmbedder(BaseEmbedder):
-    def __init__(self, base_url: str, model: str, api_key: str = "EMPTY", fallback_dim: int = 3584, timeout: int = 60) -> None:
+    def __init__(self, base_url: str, model: str, api_key: str = "EMPTY", fallback_dim: int = 3584, timeout: int = 60, strict: bool = False) -> None:
         super().__init__()
         env_dim = os.environ.get("EMBEDDING_DIM")
         if env_dim:
@@ -116,6 +120,7 @@ class OpenAICompatibleEmbedder(BaseEmbedder):
         self.fallback_dim = fallback_dim
         self.embedding_dim = fallback_dim
         self.timeout = timeout
+        self.strict = strict
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         if not texts:
@@ -134,8 +139,11 @@ class OpenAICompatibleEmbedder(BaseEmbedder):
                     self.embedding_dim = len(embeddings[0])
                     self.fallback_dim = self.embedding_dim
                 return embeddings
-            except Exception:
-                pass
+            except Exception as exc:
+                if self.strict:
+                    raise RuntimeError("Strict baseline embedding request failed; no hash fallback") from exc
+        if self.strict:
+            raise RuntimeError("Strict baseline embedding requires requests")
         return [self._hash_embedding(text, self.fallback_dim) for text in texts]
 
     @staticmethod
@@ -446,7 +454,7 @@ class MemRLMemoryBackend:
             weight_q=float(getattr(self.args, "memrl_weight_q", 0.5)),
         )
         llm = OpenAICompatibleLLM(self.args.chat_base_url, self.args.chat_model, api_key=api_key)
-        embedder = OpenAICompatibleEmbedder(self.args.embed_base_url, self.args.embed_model, api_key=api_key)
+        embedder = OpenAICompatibleEmbedder(self.args.embed_base_url, self.args.embed_model, api_key=api_key, strict=_strict_backend(self.args))
         self._service = MemoryService(
             mos_config_path=self._mos_config_path,
             llm_provider=llm,
@@ -491,10 +499,14 @@ class MemRLMemoryBackend:
         service = self._ensure_service()
         try:
             raw = service.retrieve_query(task_description=query, k=max(top_k, 1), threshold=max(threshold, 0.0))
-        except Exception:
+        except Exception as exc:
+            if _strict_backend(self.args, method):
+                raise RuntimeError("Strict baseline backend retrieval failed; no strategy fallback") from exc
             raw = service.retrieve_value_aware(task_description=query, k=max(top_k, 1), threshold=max(threshold, 0.0))
         result = raw[0] if isinstance(raw, tuple) else raw
-        if str(method) == "maple_guard":
+        if bool(getattr(self.args, "strict_comparison", False)) or method in ("provenance_acl", "maple_guard_retrieval_only", "amemguard_full", "piguard_retrieval", "piguard_lifecycle"):
+            selected = result.get("candidates") or result.get("selected") or []
+        elif str(method) in ("maple_guard", "maple_guard_retrieval_only"):
             pool = result.get("candidates") or result.get("selected") or []
             selected = [pool] if isinstance(pool, dict) else list(pool)
             selected.sort(
@@ -525,7 +537,9 @@ class MemRLMemoryBackend:
                 entry.utility_q = float(new_q)
                 if maple_guard_id in self.entries:
                     self.entries[maple_guard_id].utility_q = float(new_q)
-        except Exception:
+        except Exception as exc:
+            if _strict_backend(self.args):
+                raise RuntimeError("Strict baseline feedback update failed") from exc
             return
 
     def _entry_to_metadata(self, entry: Any, success: bool) -> Dict[str, Any]:

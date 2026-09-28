@@ -513,6 +513,7 @@ def task_for_record(ep: Any, d: Dict[str, Any], task_idx: int, args: argparse.Na
         "dataset": "tool_attack",
         "task_class": "tool_attack",
         "attack_source": "INFA_TA_InjecAgent",
+        "tool_output": d.get("agent_scratchpad", ""),
         "action_task": {
             "safe_label": "A",
             "risk_label": "B",
@@ -556,6 +557,11 @@ def add_memory_to_prompt(
         args.min_retrieval_score,
         memory_backend,
     )
+    runtime = ep.current_runtime(memory_method)
+    if runtime is not None:
+        current = dict(getattr(runtime, "selected", {}))
+        current[agent_id] = selected
+        runtime.select_memories(current)
     context = ep.render_memory_context(selected, memory_method)
     return context, [asdict(x) for x in read_decisions], [asdict(x) for x in broker_decisions], [m.memory_id for m in selected]
 
@@ -619,7 +625,11 @@ def commit_round_memory(
     memory_method = memory_method_for(method)
     attacker_idxes = set(int(x) for x in d.get("attacker_idxes", []))
     for agent_id, text in responses.items():
-        if args.attack_mode == "PI":
+        if ep.strict_runtime_active() or method in FULL_METHODS:
+            source_type, hazard, provenance_trust = "peer_message", 0.0, 0.5
+            taint, source_agent_trust, utility_q = ep.TAINT_CLEAN, 0.5, 0.0
+            intent = f"Physical-topology peer response memory for {task_class}"
+        elif args.attack_mode == "PI":
             metadata = pi_memory_metadata(int(agent_id), text, attacker_idxes, ep)
             source_type = metadata["source_type"]
             hazard = metadata["hazard"]
@@ -662,7 +672,7 @@ def commit_round_memory(
             parents=[task.task_id, f"attack_source={args.attack_mode}", f"topology={args.graph_type}"],
             retrieval_key=task.question,
         )
-        ok, ds = ep.commit_memory(entry, "team", int(agent_id), memory_method, private_memories, shared_memories, memory_backend)
+        ok, ds = ep.commit_memory(entry, "team", int(agent_id), memory_method, private_memories, shared_memories, memory_backend, ingress_channel='peer_message')
         decision_items = [asdict(x) for x in ds]
         decisions.extend(decision_items)
         if args.stream_memories and memory_journal_path is not None:
@@ -1017,6 +1027,8 @@ def run_one_method(ep: Any, records: Sequence[Dict[str, Any]], method: str, args
         runtime = current_runtime(method)
         if runtime is not None:
             runtime.begin_task(task.task_id, task.question)
+            if hasattr(runtime, "observe_task_inputs"):
+                runtime.observe_task_inputs(task.raw)
         messages: Dict[int, List[Dict[str, str]]] = {
             i: [{"role": "system", "content": d["system_prompts"][i]}] for i in range(args.agents)
         }
@@ -1285,6 +1297,7 @@ def main() -> None:
     }
     for method in methods:
         summary = run_one_method(ep, records, method, args)
+        summary["baseline_provenance"] = ep.baseline_run_provenance(args)
         combined_summary["methods"][method] = summary
         print(json.dumps({"method": method, **summary}, indent=2, ensure_ascii=False), flush=True)
 

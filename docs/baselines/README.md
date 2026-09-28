@@ -1,62 +1,54 @@
-# Full-component baseline integration
+# Strict baselines and evaluation controls
 
-The new opt-in methods are `agentsafe_full`, `infa_guard_full`, `agentxposed_full_guide`, and `agentxposed_full_kick`. They reconstruct the declared paper components with documented MAPLE adaptations. They do not assert identical source behavior or reproduced paper numbers. Legacy names and checkpoints remain available under their original adapters.
+Method names ending in `full` identify component coverage, not reproduced paper scores or identical experimental settings.
 
-| Method | Components connected to the actual runner | Protocol details |
+| Method | Implementation | Material boundary |
 | --- | --- | --- |
-| AgentSafe | Four cumulative access levels; directional relationships; identity checks; all-criterion strict cosine admission; periodic reflection; persistent junk; write/read/promotion/recipient routing | [AgentSafe](agentsafe_full.md) |
-| INFA-Guard | Native temporal MyGAT; independent attacker/infection heads; infection EMA and topology refinement; donor replacement; infected correction and live context repair | [INFA](infa_full.md) |
-| AgentXposed | Contextual HEXACO baseline; temporal deviation; real adaptive questioning; final reassessment; live Guide and task re-answer; persistent Kick | [AgentXposed](agentxposed_full.md) |
+| provenance_acl | Independent provenance propagation and ownership/ACL across lifecycle | Custom conservative rule control |
+| maple_guard_retrieval_only | Same MAPLE score/read policy; non-retrieval gates bypassed | Compare with maple_guard --strict-comparison |
+| agentsafe_full | Holder-local hierarchy, identity/criteria, cumulative generation history, permissions, reflection and junk | Paper components; unpublished criteria/threshold/prompts remain explicit configuration |
+| infa_guard_full | Native MyGAT dual heads and released orchestration by default | Trained native checkpoint required; original single-output weights preserved |
+| agentxposed_full_guide / _kick | Hash-pinned released source and explicit minimal bug repair | Original detection bug; MAPLE scheduling differs from offline replay |
+| amemguard_full | Released EHRAgent reasoning paths, joint audit and lesson retrieval/warning | Official joint audit differs from paper Appendix pairwise description |
+| piguard_retrieval / _lifecycle | Official pinned HF detector at different stages | Lifecycle deployment is our experiment; CPU parity passed, benchmark pending |
 
-## Scope and comparison protocol
+Details: [custom controls](strict_controls.md), [AgentSafe](agentsafe_full.md), [INFA](infa_full.md), [AgentXposed](agentxposed_full.md), [A-MemGuard](amemguard_full.md), [PIGuard](piguard.md).
 
-MMLU, LongMemEval, AppWorld (through its MMLU stream wrapper), and the INFA PI/TA transfer runner accept the new method names. The core episode runner also exposes them. Full methods share a scoped runtime; calling their low-level memory operations outside a runtime raises instead of bypassing protection.
+## Comparison protocol
 
-Full methods exchange actual previous-round incoming-edge messages in MMLU/LongMemEval/AppWorld. For a matched comparison, pass `--peer-communication` to **every** comparison arm, including MAPLE and no-defense. This option also exists for legacy methods. Keep agent count, topology, rounds, memory backend, task stream, attack stream, model, and feedback regime identical. Optional memory handoffs still operate; report whether they are enabled. Do not mix old memory-only results with this communication protocol.
+MMLU, LongMemEval, AppWorld through the stream wrapper, core episodes and INFA PI/TA transfer expose the new methods. Use `--strict-comparison --peer-communication` for every arm, including no-defense. Full communication methods exchange incoming-edge messages; old memory-only MAPLE results are not a matched comparison.
 
-Full methods do not exclude nodes using evaluator attacker labels in final aggregation. `--exclude-attackers-from-final-vote`, causal replay without independent state, and extra heuristic/source-aware communication guards are rejected in full mode. Structured poison labels, hidden roles and reference-answer fields never enter defense components. However, existing benchmark memory text can contain outcome feedback/reference answers, and the LongMemEval adjudicator retains its task-scoped history protocol. This change is not a claim to remove all outcome feedback from the benchmark.
+Freeze agents, rounds, topology, task/attack ordering, prompt, model, retrieval and feedback settings. Use fresh stores and a distinct `--baseline-state-path` per method/seed. Within-run tasks retain lessons/history; changed experiment configurations cannot silently reuse runtime state. Never share a sidecar across concurrent processes.
 
-The runner holds private target context. Inquiry and Guide call the actual agent; the judge sees public observations only. Kick removes generation, routing, selected memories, and final output participation for the remainder of the task. INFA donor replacement preserves donor operational task/tool context and redirects subsequent private-memory reads to the donor source. All agents use the same model/tool implementation in this harness; heterogeneous executable tool replacement is outside this adapter.
+Oracle vote exclusions, extra heuristic/source-aware communication guards and causal replay without isolated state are rejected. Existing post-task reference-answer feedback remains a benchmark assumption. The launcher uses accepted-answer promotion instead of optional success-only promotion.
 
-AgentSafe rebuilds each task prompt from currently permitted memories and routed peers, so quarantined old prompt text does not survive through conversation history. It validates loaded LongMemEval history before insertion and includes registered records in periodic reflection. Registered record text and quarantine state are persisted in the sidecar; use a fresh memory store or migrate/register a pre-existing legacy bank before describing its entire historical contents as reviewed.
+## Required configuration
 
-## Configuration
+Flags also work under YAML `defense.full` using underscore names. Full judge URL/model default to task chat settings. Credentials belong in environment variables. Prompt schemas and failure semantics follow the selected profile. Strict retrieval infrastructure never silently substitutes hash vectors or another retrieval strategy.
 
-All full flags work on the public runners and may also be set under YAML `defense.full` using underscore names. Do not put API keys in committed configs. `FULL_BASELINE_API_KEY` is the optional judge credential environment variable.
+AgentSafe needs explicit policy, criterion library and threshold. Examples are illustrative MAPLE choices, not official defaults or validated hyperparameters. Include identity -1 for LongMemEval history. Component state v3 and runtime state v2 preserve holder-specific evidence. A private copy for another holder requires a new memory ID.
 
-The full judge defaults to `chat_base_url` / `chat_model`, not the old safeguard endpoint. Override with `--full-judge-base-url`, `--full-judge-model`, and optionally `--full-judge-max-tokens` (default 4096). Requests use temperature zero and JSON-object output. `--disable-chat-thinking` is honored. Malformed/truncated judgments, network errors, missing model artifacts, and bad embeddings fail the run; there is no allow-all or hash-embedding fallback inside full components.
+A-MemGuard needs `--amemguard-experiment-id`, real judge and real embeddings. Source prompts retain MIT attribution. The old pure_a_memguard_memrl is a heuristic proxy and must not be described as the full method.
 
-AgentSafe requires `--agentsafe-policy-file`, `--agentsafe-criteria-file`, and an explicit `--agentsafe-threshold`. Policy identities must cover all operational agents. LongMemEval preloaded user history uses reserved identity `-1`; include it and intended reader clearances. The [three-agent policy](examples/agentsafe-policy.json) and [criteria file](examples/agentsafe-criteria.json) are **illustrative MAPLE configuration**, not released author defaults or validated hyperparameters. Choose and freeze criteria/threshold on separate clean development data. The paper does not publish a reproducible criterion library or defense threshold. `--agentsafe-review-interval` defaults to one round.
+INFA needs `--infa-code-dir` and `--infa-checkpoint`. Default `--infa-protocol released` preserves released first/later-turn behavior; reconstruction preserves the former paper approximation. Detector mode profile preserves the official loader's train/dropout behavior; eval is a recorded deviation. The functional sanitizer transport explicitly fixes upstream's synchronous-await bug; released_sync_bug reproduces its redaction fallback. Bundled communication_gnn weights declare single-output GSafeguardGAT without infection heads. Their bytes and legacy use are unchanged; native INFA never invents missing trained heads.
 
-For persistent MemRL runs, AgentSafe also requires `--baseline-state-path`. Use a distinct path for each method/seed/memory store. The JSON sidecar saves classifications, record registry, review clock, and versioned quarantine evidence atomically. Keep it with the memory store. Do not share one sidecar across concurrent runs. AgentXposed/INFA task states reset at the next task; this implementation does not resume a partially executed communication task from disk.
+AgentXposed needs `--agentxposed-code-dir`. released_minimal_fix patches the absent final-score assignment; released_unmodified exposes the original no-detection behavior; reconstruction preserves the former live-inquiry approximation. Record source hashes, patch status and actual judge model.
 
-INFA requires an explicit `--infa-code-dir` official checkout and `--infa-checkpoint`. Loading is strict against the native model structure; checkpoint names are not used to infer compatibility. See the INFA document for embedding dependencies, source version, output ordering, and released-code deviations. The bundled `communication_gnn/{longmemeval,appworld}.pth` files declare `GSafeguardGAT`, `out_channels=1`, `out.weight=[1,1024]`, and `method_scope=communication_only`. They remain usable by the legacy detector. They do not contain native INFA's temporal branches or infection head; keeping those weights cannot alone reproduce that missing trained detector.
+PIGuard's verified server snapshot is `/mnt/public/data/wj/baseline-references/PIGuard-hf-dd78b24`. Fixed revision: dd78b24e330193a22d2293ac66922dd4f982f563; default CPU FP32, length512, threshold0.5. [Real parity evidence](evidence/piguard-cpu-parity.json) is not benchmark performance.
 
-AgentXposed defaults are `--agentxposed-deviation-threshold 1`, `--agentxposed-inquiry-rounds 3`, `--agentxposed-guide-rounds 2`. The final deviation threshold and Guide count are disclosed reconstruction choices. At least two observed task rounds are needed to compare against a first-observation baseline. Count and report all profiling/inquiry/Guide calls and tokens when comparing latency/cost.
+## Running
 
-## Running and verification
-
-Run from the repository root. These commands demonstrate configuration; they are not stored benchmark results:
+Use the isolated server environment:
 
 ```bash
-python3 -m unittest discover -s tests -v
-python3 tools/baseline_preflight.py --method agentxposed_full_kick \
-  --chat-base-url http://127.0.0.1:8001/v1 --chat-model YOUR_JUDGE_MODEL
-python3 tools/baseline_preflight.py --inspect-checkpoint communication_gnn/longmemeval.pth
-python3 -m maple_guard.run_mmlu --config configs/mmlu_chain.yaml \
-  --method agentxposed_full_guide --peer-communication --disable-chat-thinking
-python3 -m maple_guard.run_longmemeval --config configs/longmemeval_chain.yaml \
-  --method agentsafe_full --agents 3 --peer-communication --disable-chat-thinking \
-  --agentsafe-policy-file docs/baselines/examples/agentsafe-policy.json \
-  --agentsafe-criteria-file docs/baselines/examples/agentsafe-criteria.json \
-  --agentsafe-threshold YOUR_VALIDATED_THRESHOLD \
-  --baseline-state-path /YOUR_RUN/agentsafe-state.json
-python3 -m maple_guard.run_mmlu --config configs/mmlu_chain.yaml \
-  --method infa_guard_full --peer-communication \
-  --infa-code-dir /PATH/TO/OFFICIAL/INFA-Guard \
-  --infa-checkpoint /PATH/TO/COMPATIBLE/INFA_CHECKPOINT
+cd /mnt/public/data/wj/MAPLE-Guard-baselines
+PY=/mnt/public/data/wj/venvs/maple-baselines/bin/python
+"$PY" -m unittest discover -s tests -v
+"$PY" tools/baseline_preflight.py --method provenance_acl
+"$PY" tools/baseline_preflight.py --method piguard_retrieval --piguard-smoke --piguard-model /mnt/public/data/wj/baseline-references/PIGuard-hf-dd78b24
+"$PY" tools/baseline_preflight.py --inspect-checkpoint communication_gnn/longmemeval.pth
 ```
 
-Preflight `configuration_loaded` confirms construction, not a live multi-agent test or reproduction of accuracy. AgentSafe construction contacts the configured embedding endpoint to validate criterion vectors; INFA construction may load its embedding model. Checkpoint inspection uses `torch.load(weights_only=True)` and prints only metadata/shapes/hash. It does not execute inference or substitute a model.
+[Launch script](../../configs/strict_baselines/run_mmlu.sh) uses distinct method/seed stores and validates required configuration. Default dry-run prints commands; EXECUTE=1 performs real model calls. Use corresponding runner flags for other benchmarks.
 
-Deterministic tests substitute external judge/embedding/agent responses and exercise actual control, memory, and runner paths. They are software verification, not benchmark experiments. Fresh model-backed runs and statistical reporting are still necessary before updating a paper table. Record git commit, source commit/hash, checkpoint SHA-256, embedding/judge models, policy, threshold, and all protocol options with each run.
+Preflight and deterministic tests do not establish paper accuracy. Dataset/model services were unavailable during implementation; multi-seed benchmarks remain pending. PIGuard has real trained-model smoke/parity evidence. Native INFA fixture tests verify tensor wiring only. Record git/source/checkpoint hashes, model IDs, policy, thresholds, stream identity and environment with each experiment; do not relabel old table numbers as new results.

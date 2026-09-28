@@ -800,6 +800,8 @@ def commit_trusted_seed_memory(
     admission = []
     runtime = ep.current_runtime(method)
     if runtime is not None:
+        if hasattr(runtime, "observe_ingress"):
+            runtime.observe_ingress(entry, "user_history", requested_scope, target_agent_id, [])
         allowed, raw = runtime.admit(entry, requested_scope, target_agent_id)
         admission = ep.official_communication_decisions_to_trace(raw, method, entry.origin_task, entry.origin_round)
         if not allowed:
@@ -1225,6 +1227,9 @@ def parse_json_answer(raw: str) -> Tuple[str, Dict[str, Any]]:
 
 
 def memory_parent_value(memory: ep.MemoryEntry, prefix: str) -> str:
+    metadata = getattr(memory, "baseline_metadata", {})
+    if "operational" in metadata:
+        return str(metadata.get("history_display", {}).get(prefix, ""))
     needle = f"{prefix}="
     for parent in getattr(memory, "parents", []) or []:
         raw = str(parent)
@@ -1298,7 +1303,7 @@ def adjudicate_final_answer(
     args: argparse.Namespace,
     prompt_bundle: Dict[str, Any],
 ) -> Tuple[str, Dict[str, Any]]:
-    attacker_set = set() if args.method in ep.FULL_METHODS else set(args.attacker_ids)
+    attacker_set = set() if args.method in ep.FULL_METHODS or ep.strict_runtime_active() else set(args.attacker_ids)
     consensus = consensus_answer(final_outputs, attacker_set)
     decision: Dict[str, Any] = {
         "stage": "trusted_evidence_adjudicator",
@@ -1444,6 +1449,8 @@ def run_openqa_task(
     runtime = ep.current_runtime(args.method)
     if runtime is not None:
         runtime.begin_task(task.task_id, task.question)
+        if hasattr(runtime, "observe_task_inputs"):
+            runtime.observe_task_inputs(task.raw)
 
     for r in range(int(args.rounds)):
         if r > 0 and bool(args.enable_round_memory_propagation) and not bool(args.disable_private_memory):
@@ -1480,6 +1487,7 @@ def run_openqa_task(
                     args.min_retrieval_score,
                     memory_backend,
                     bool(args.disable_private_memory),
+                    candidate_filter=lambda memories: [m for m in memories if memory_belongs_to_task(task, m)],
                 )
                 selected = filter_task_scoped_memories(task, selected, int(args.top_k_memory), args)
                 selected_by_agent[agent_id] = selected
@@ -1555,9 +1563,12 @@ def run_openqa_task(
             if is_trusted_user_history(memory):
                 continue
             memory.update_outcome(is_correct)
-            ep.derive_provenance_scores(memory)
+            if runtime is None or not hasattr(runtime, "record_feedback"):
+                ep.derive_provenance_scores(memory)
             if memory_backend is not None:
                 memory_backend.update_value(memory, is_correct)
+            if runtime is not None and hasattr(runtime, "record_feedback"):
+                runtime.record_feedback(memory)
 
     trace = ep.TaskRunTrace(
         phase="longmemeval",
@@ -1726,7 +1737,7 @@ def run_stream_task(
             final_answer = extract_final_answer(output)
             correct, _decision = judge_correctness(task, final_answer, args, prompt_bundle, answer_cache)
             entry = create_openqa_benign_memory(task, int(agent_id), output, correct)
-            _written, ds = ep.commit_memory(entry, "private", int(agent_id), args.method, private_memories, shared_memories, memory_backend)
+            _written, ds = ep.commit_memory(entry, "private", int(agent_id), args.method, private_memories, shared_memories, memory_backend, ingress_channel='agent_output')
             all_defense.extend(ds)
 
     inventory = ep.memory_inventory(private_memories, shared_memories, memory_backend)
@@ -1999,6 +2010,7 @@ def main() -> None:
                 log_progress(args, short_status(idx, len(examples), record, time.time() - t0))
 
     summary = summarize(records, args, poisoned_targets, private_memories, shared_memories, memory_backend)
+    summary["baseline_provenance"] = ep.baseline_run_provenance(args)
     text_memory_dir = dump_text_memory(args, private_memories, shared_memories, memory_backend, summary)
     summary["text_memory_dir"] = text_memory_dir
     summary_path = args.out.replace(".jsonl", ".summary.json")

@@ -251,6 +251,7 @@ def main() -> None:
         memory_backend,
         agent_trust,
     )
+    summary["baseline_provenance"] = ep.baseline_run_provenance(args)
     add_appworld_summary(summary, records)
     summary["appworld_manifest"] = manifest
     text_memory_dir = stream.dump_text_memory(args, private_memories, shared_memories, memory_backend, summary)

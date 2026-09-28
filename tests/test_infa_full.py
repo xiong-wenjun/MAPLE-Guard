@@ -33,17 +33,17 @@ class InfaFullTests(unittest.TestCase):
     def args(self, n=3, **changes):
         values = dict(agents=n, infa_threshold=0.5, infa_donor_threshold=0.1,
                       infa_code_dir="", infa_checkpoint="", infa_embedding_model="MiniLM",
-                      infa_device="cpu")
+                      infa_device="cpu", infa_protocol="reconstruction")
         values.update(changes)
         return SimpleNamespace(**values)
 
-    def make(self, probabilities, n=3):
+    def make(self, probabilities, n=3, protocol="reconstruction"):
         detector = Detector(probabilities)
         self.judge_calls, self.replacements, self.repairs = [], [], []
         def judge(messages):
             self.judge_calls.append(messages)
             return json.dumps({"response": "corrected answer"})
-        guard = self.module.InfaGuardFull(self.args(n), judge, detector=detector)
+        guard = self.module.InfaGuardFull(self.args(n, infa_protocol=protocol), judge, detector=detector)
         guard.begin_task("task")
         return guard, detector
 
@@ -53,6 +53,109 @@ class InfaFullTests(unittest.TestCase):
                             "Current question", idx, adjacency,
                             replace=lambda *x: self.replacements.append(x),
                             repair=lambda *x: self.repairs.append(x))
+
+    def test_released_is_default_and_first_turn_allows_infected_high_probability_donor(self):
+        guard, _ = self.make([[[0.9,0.0],[0.2,0.8],[0.3,0.0]]], protocol="released")
+        args = self.args()
+        del args.infa_protocol
+        default = self.module.InfaGuardFull(args, lambda _: "", detector=Detector([]))
+        self.assertEqual(getattr(default, "protocol", None), "released")
+        result, decisions = self.defend(guard, {0:"attacker",1:"infected donor",2:"other"})
+        self.assertEqual(result, {0:"infected donor",1:"infected donor",2:"other"})
+        self.assertEqual(self.replacements, [(0,1,"infected donor")])
+        self.assertEqual(self.judge_calls, [])
+        self.assertEqual(self.repairs, [])
+        self.assertEqual(guard.p_inf_ema, [0.0,0.0,0.0])
+        self.assertEqual(guard.blocked_senders, {0})
+        self.assertEqual(guard.inactive, set())
+        self.assertEqual(guard.takeover_context, "donor_system_only")
+        self.assertFalse(decisions[0]["details"]["ema_updated"])
+        self.assertEqual(decisions[1]["details"]["raw_infected"], [1])
+        self.assertEqual(decisions[1]["details"]["infected"], [])
+
+    def test_released_later_cutoff_retains_flagged_agents_without_changing_detection_graph(self):
+        probabilities = [[[0.01,0.0]]*3, [[0.9,0.0],[0.001,0.8],[0.2,0.0]], [[0.01,0.0]]*3]
+        guard, detector = self.make(probabilities, protocol="released")
+        guard.judge = lambda _: "raw corrected answer"
+        first = {0:"initial0",1:"initial1",2:"initial2"}
+        self.defend(guard, first)
+        result, decisions = self.defend(guard, {0:"raw attack",1:"raw infection",2:"uncertain"}, 1)
+        self.assertEqual(result, {0:"raw attack",1:"raw corrected answer",2:"uncertain"})
+        self.assertEqual(self.replacements, [])
+        self.assertEqual(self.repairs, [])
+        self.assertEqual(guard.inactive, set())
+        self.assertEqual(guard.blocked_senders, {0,1})
+        self.assertAlmostEqual(guard.p_inf_ema[1], 0.24)
+        self.assertEqual(decisions[0]["reason"], "infa_no_benign_donor_retained")
+        self.defend(guard, {0:"next0",1:"next1",2:"next2"}, 2)
+        self.assertEqual(detector.calls[-1][1], [[0,1,1],[1,0,1],[1,1,0]])
+        self.assertEqual(guard.blocked_senders, set())
+        self.assertEqual(detector.calls[-1][0][1], ["raw attack","raw infection","uncertain"])
+
+    @unittest.skipUnless(importlib.util.find_spec("numpy"), "native numeric dependency")
+    def test_released_float32_cutoff_and_ema_match_source_numpy_semantics(self):
+        import numpy as np
+        guard, _ = self.make([[[0.01,0.0]]*2,
+                              [[0.9,0.0],[float(np.float32(0.1)),0.0]]], n=2, protocol="released")
+        self.defend(guard, {0:"initial0",1:"initial1"})
+        result, _ = self.defend(guard, {0:"attack",1:"threshold donor"}, 1)
+        self.assertEqual(result[0], "threshold donor")
+        guard, _ = self.make([[[0.01,0.0]], [[0.01,0.8]]], n=1, protocol="released")
+        guard.judge = lambda _: "fixed"
+        self.defend(guard, {0:"initial"})
+        self.defend(guard, {0:"infection"}, 1)
+        expected = 0.3 * np.array([0.8], dtype=np.float32) + 0.7 * np.zeros(1, dtype=np.float32)
+        self.assertEqual(guard.p_inf_ema, expected.tolist())
+
+    def test_released_all_flagged_agents_continue_and_task_reset_clears_sender_filter(self):
+        guard, detector = self.make([[[0.9,0.0]]*2]*2, n=2, protocol="released")
+        original = {0:"attack0",1:"attack1"}
+        for idx in (0,1):
+            result, _ = self.defend(guard, original, idx)
+            self.assertEqual(result, original)
+            self.assertEqual(guard.inactive, set())
+            self.assertEqual(guard.blocked_senders, {0,1})
+        self.assertEqual(len(detector.calls), 2)
+        guard.begin_task("next task")
+        self.assertEqual(guard.blocked_senders, set())
+        self.assertEqual(guard.p_inf_ema, [0.0,0.0])
+
+    def test_released_correction_uses_text_contract_and_source_redaction_fallback(self):
+        guard, _ = self.make([[[0.01,0.0]], [[0.01,0.8]], [[0.01,0.8]]], n=1, protocol="released")
+        calls = []
+        answer = "<REASON>: repaired reasoning\n<ANSWER>: A"
+        def judge(messages):
+            calls.append(messages)
+            if len(calls) == 2:
+                raise OSError("test provider unavailable")
+            return answer
+        guard.judge = judge
+        self.defend(guard, {0:"first"})
+        result, decisions = self.defend(guard, {0:"unsafe original"}, 1)
+        self.assertEqual(result[0], answer)
+        self.assertEqual(self.repairs, [])
+        self.assertIn("Return only the rewritten text.", calls[0][0]["content"])
+        self.assertIn("Communication history: No previous communication history.", calls[0][1]["content"])
+        self.assertFalse(decisions[0]["details"]["correction_fallback"])
+        result, decisions = self.defend(guard, {0:"password Password PASSWORD key Attack prompt injection backdoor collude"}, 2)
+        self.assertEqual(result[0], "[REDACTED] [REDACTED] PASSWORD [REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED]")
+        self.assertTrue(decisions[0]["details"]["correction_fallback"])
+        self.assertFalse(decisions[0]["details"]["context_repaired"])
+
+    def test_released_sync_bug_profile_and_transport_fix_are_explicit(self):
+        for profile, expected in (("released_sync_bug","[REDACTED] unsafe"),("functional","rewritten")):
+            calls=[]
+            guard=self.module.InfaGuardFull(
+                self.args(1,infa_protocol="released",infa_correction_transport=profile),
+                lambda messages:calls.append(messages) or "rewritten",
+                detector=Detector([]))
+            actual,fallback=guard._correct(0,"password unsafe","task",[[0]])
+            self.assertEqual(actual,expected)
+            self.assertEqual(fallback,profile=="released_sync_bug")
+            self.assertEqual(len(calls),1)
+            self.assertEqual(guard.provenance["sanitizer_sync_await_fixed"],profile=="functional")
+        with self.assertRaises(self.module.InfaConfigError):
+            self.module.InfaGuardFull(self.args(infa_correction_transport="unknown"),lambda m:"x",detector=Detector([]))
 
     def test_replaces_attackers_and_rehabilitates_infected_without_pruning_repaired_nodes(self):
         guard, detector = self.make([[[0.9,0.0],[0.05,0.8],[0.02,0.0]]])
@@ -172,7 +275,7 @@ class InfaFullTests(unittest.TestCase):
             else: sys.modules["train"] = previous
 
     def test_invalid_startup_configuration_fails_explicitly(self):
-        for changes in ({"infa_threshold":float("nan")}, {"infa_donor_threshold":-1}, {"agents":0}):
+        for changes in ({"infa_threshold":float("nan")}, {"infa_donor_threshold":-1}, {"agents":0}, {"infa_protocol":"unknown"}, {"infa_detector_mode":"unknown"}):
             with self.subTest(changes=changes), self.assertRaises(self.module.InfaConfigError):
                 self.module.InfaGuardFull(self.args(**changes), lambda _: "", detector=Detector([]))
         with self.assertRaises(self.module.InfaConfigError):
@@ -219,6 +322,16 @@ class InfaFullTests(unittest.TestCase):
             except TypeError as exc:
                 self.fail("Native detector needs an injectable embedding dependency: " + str(exc))
             self.assertFalse(detector.model.training)
+            self.assertEqual(detector.provenance["detector_mode"], "eval")
+            released = self.module.NativeInfaDetector(self.args(infa_protocol="released", infa_code_dir=str(root),
+                       infa_checkpoint=str(checkpoint)), embedder=FixtureEmbedder())
+            self.assertTrue(released.model.training)
+            self.assertEqual(released.provenance["detector_mode"], "train")
+            self.assertFalse(released.provenance["detector_mode_overrides_release"])
+            deterministic = self.module.NativeInfaDetector(self.args(infa_protocol="released", infa_detector_mode="eval",
+                       infa_code_dir=str(root), infa_checkpoint=str(checkpoint)), embedder=FixtureEmbedder())
+            self.assertFalse(deterministic.model.training)
+            self.assertTrue(deterministic.provenance["detector_mode_overrides_release"])
             result = detector([["a","b","c"],["d","e","f"]], [[0,1,0],[0,0,1],[1,0,0]])
             self.assertEqual(tuple(torch.tensor(result).shape), (3,2))
             self.assertTrue(torch.isfinite(torch.tensor(result)).all())

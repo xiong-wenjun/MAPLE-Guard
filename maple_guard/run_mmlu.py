@@ -1094,7 +1094,7 @@ def maybe_promote_benign_to_shared(
     final_round_outputs = (task_trace.outputs_by_round[-1] if task_trace and getattr(task_trace, "outputs_by_round", None) else {})
     eligible_agent_ids: List[int] = []
     for agent_id in range(args.agents):
-        if agent_id in attacker_set:
+        if agent_id in attacker_set and not (ep.strict_runtime_active() or args.method in ep.FULL_METHODS):
             continue
         if float(agent_trust.get(agent_id, 0.5)) < min_trust:
             continue
@@ -1131,7 +1131,7 @@ def maybe_promote_benign_to_shared(
             float(agent_trust.get(origin_agent, 0.5)),
             args.agents,
         )
-        written, ds = ep.commit_memory(team_entry, "team", origin_agent, args.method, private_memories, shared_memories, memory_backend)
+        written, ds = ep.commit_memory(team_entry, "team", origin_agent, args.method, private_memories, shared_memories, memory_backend, ingress_channel='agent_output')
         decisions.extend(ds)
         if written:
             promoted_ids.append(team_entry.memory_id)
@@ -2196,6 +2196,7 @@ def main() -> None:
                 log_progress(args, short_status(idx, len(task_stream), record, time.time() - t0))
 
     summary = summarize_stream(records, args, poison_indices, poisoned_memory_targets, private_memories, shared_memories, memory_backend, agent_trust)
+    summary["baseline_provenance"] = ep.baseline_run_provenance(args)
     text_memory_dir = dump_text_memory(args, private_memories, shared_memories, memory_backend, summary)
     summary["text_memory_dir"] = text_memory_dir
     summary_path = args.out.replace(".jsonl", ".summary.json")

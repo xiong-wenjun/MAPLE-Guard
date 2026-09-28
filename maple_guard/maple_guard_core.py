@@ -59,7 +59,7 @@ else:
 
 
 from evaluate.defense_methods.full_runtime import (
-    FULL_METHODS, current_runtime, scoped_baseline, add_full_baseline_args, peer_context,
+    FULL_METHODS, current_runtime, scoped_baseline, add_full_baseline_args, peer_context, strict_runtime_active, current_runtime_active, baseline_run_provenance,
 )
 
 ATTACK_CAP_DMI = "dmi"
@@ -86,6 +86,8 @@ METHOD_CHALLENGER = "challenger"
 METHOD_GUARDIAN = "guardian"
 METHOD_INSPECTOR = "inspector"
 METHOD_MAPLE_GUARD = "maple_guard"
+METHOD_MAPLE_RETRIEVAL_ONLY = "maple_guard_retrieval_only"
+COMPARISON_METHODS = ("provenance_acl", METHOD_MAPLE_RETRIEVAL_ONLY, "amemguard_full", "piguard_retrieval", "piguard_lifecycle")
 METHOD_MAPLE_GUARD_NO_WRITE = "maple_guard_no_write"
 METHOD_MAPLE_GUARD_NO_RETRIEVAL = "maple_guard_no_retrieval"
 METHOD_MAPLE_GUARD_NO_PROMOTION = "maple_guard_no_promotion"
@@ -125,6 +127,7 @@ OFFICIAL_COMMUNICATION_DEFENSE_METHODS = (
 )
 DEFENSE_METHODS = (
     *FULL_METHODS,
+    *COMPARISON_METHODS,
     METHOD_PURE_GSAFEGUARD_MEMRL,
     METHOD_PURE_INFA_MEMRL,
     METHOD_PURE_AMEMGUARD_MEMRL,
@@ -143,7 +146,7 @@ COMMUNICATION_GUARD_METHODS = (
     METHOD_PURE_INFA_MEMRL,
     *OFFICIAL_COMMUNICATION_DEFENSE_METHODS,
 )
-MEMORY_GUARD_METHODS = (*MAPLE_GUARD_LIFECYCLE_METHODS, METHOD_PURE_AMEMGUARD_MEMRL)
+MEMORY_GUARD_METHODS = (*MAPLE_GUARD_LIFECYCLE_METHODS, METHOD_PURE_AMEMGUARD_MEMRL, *COMPARISON_METHODS)
 
 
 def normalize_method(method: Any) -> str:
@@ -162,6 +165,7 @@ def method_uses_maple_guard_lifecycle(method: str) -> bool:
 def method_uses_maple_guard_retrieval(method: str) -> bool:
     return normalize_method(method) in (
         METHOD_MAPLE_GUARD,
+        METHOD_MAPLE_RETRIEVAL_ONLY,
         METHOD_MAPLE_GUARD_NO_WRITE,
         METHOD_MAPLE_GUARD_NO_PROMOTION,
         METHOD_MAPLE_GUARD_NO_CROSS_AGENT,
@@ -196,7 +200,7 @@ def method_baseline_note(method: str) -> str:
     if method == METHOD_PURE_INFA_MEMRL:
         return "Pure INFA-Guard baseline: original-scope infection/communication spread guard only; no persistent-memory lifecycle rewriting."
     if method == METHOD_PURE_AMEMGUARD_MEMRL:
-        return "Pure A-MemGuard baseline: consensus and lesson-memory validation only; no MAPLE-Guard provenance, taint, or lifecycle-risk features."
+        return "Legacy A-MemGuard proxy: historical answer-letter consensus and token-overlap lessons; NOT a full official reproduction. Use amemguard_full for the source-based adapter."
     if method in OFFICIAL_COMMUNICATION_DEFENSE_METHODS:
         return "Official-scope communication baseline adapter: communication-output guard only; no persistent-memory write, read, promotion, taint, provenance, or lifecycle-risk hooks."
     return "native_method"
@@ -634,7 +638,13 @@ def memory_embedding_text(entry: MemoryEntry) -> str:
 def ensure_embedding(entry: MemoryEntry, embed_base_url: str, embed_model: str) -> List[float]:
     if entry.embedding is None:
         text = memory_embedding_text(entry)
-        entry.embedding = remote_embedding(text, embed_base_url, embed_model) or hash_embedding(text)
+        entry.embedding = remote_embedding(text, embed_base_url, embed_model)
+        if not entry.embedding and strict_runtime_active():
+            raise RuntimeError("Strict comparison embedding request failed; hash fallback is disabled")
+        entry.embedding = entry.embedding or hash_embedding(text)
+        if strict_runtime_active():
+            runtime = current_runtime_active()
+            if hasattr(runtime, "record_embedding"):runtime.record_embedding(entry)
     return entry.embedding
 
 
@@ -1272,7 +1282,7 @@ def write_firewall(entry: MemoryEntry, method: str) -> DefenseDecision:
     if method == METHOD_PURE_AMEMGUARD_MEMRL:
         return pure_a_memguard_write_firewall(entry)
     if not method_uses_maple_guard_lifecycle(method):
-        return DefenseDecision("write_firewall", ACTION_ALLOW, entry.memory_id, entry.origin_agent, entry.origin_task, "baseline_no_write_firewall", decision_details(entry))
+        return DefenseDecision("write_firewall", ACTION_ALLOW, entry.memory_id, entry.origin_agent, entry.origin_task, "baseline_no_write_firewall", basic_decision_details(entry))
     if method == METHOD_MAPLE_GUARD_NO_WRITE:
         return DefenseDecision("write_firewall", ACTION_ALLOW, entry.memory_id, entry.origin_agent, entry.origin_task, "ablation_no_write_firewall", decision_details(entry))
     profile = memory_lifecycle_risk(entry)
@@ -1333,9 +1343,11 @@ def promotion_gate(entry: MemoryEntry, method: str, requested_scope: str) -> Def
 def broker_decision(entry: MemoryEntry, agent_id: int, method: str, memory_topology: str, task_id: str) -> DefenseDecision:
     method = normalize_method(method)
     details = decision_details(entry) if method_uses_maple_guard_lifecycle(method) else basic_decision_details(entry)
+    if method == METHOD_MAPLE_RETRIEVAL_ONLY:
+        return DefenseDecision("memory_broker", ACTION_ALLOW, entry.memory_id, agent_id, task_id, "retrieval_only_no_broker_gate", details)
     if memory_topology not in (MEM_BROKERED_SHARED, MEM_ROLE_ISOLATED):
         return DefenseDecision("memory_broker", ACTION_ALLOW, entry.memory_id, agent_id, task_id, "direct_shared_memory_access", details)
-    if method not in MEMORY_GUARD_METHODS:
+    if method not in (*MAPLE_GUARD_LIFECYCLE_METHODS, METHOD_PURE_AMEMGUARD_MEMRL):
         return DefenseDecision("memory_broker", ACTION_ALLOW, entry.memory_id, agent_id, task_id, "baseline_broker_no_policy", details)
     if method == METHOD_MAPLE_GUARD_NO_CROSS_AGENT:
         return DefenseDecision("memory_broker", ACTION_ALLOW, entry.memory_id, agent_id, task_id, "ablation_no_cross_agent_gate", details)
@@ -1670,6 +1682,9 @@ def visible_memories(
     task_id: str,
     disable_private_memory: bool = False,
 ) -> Tuple[List[MemoryEntry], List[DefenseDecision]]:
+    runtime = current_runtime(normalize_method(method))
+    if runtime is not None and hasattr(runtime, "prepare_entries"):
+        runtime.prepare_entries(list(private_memories.get(agent_id, [])) + list(shared_memories))
     visible = [] if disable_private_memory else list(private_memories.get(agent_id, []))
     decisions: List[DefenseDecision] = []
     for m in shared_memories:
@@ -1690,15 +1705,19 @@ def commit_memory(
     private_memories: Dict[int, List[MemoryEntry]],
     shared_memories: List[MemoryEntry],
     memory_backend: Optional[Any] = None,
+    *, ingress_channel: str = "external", parent_entries=None,
 ) -> Tuple[bool, List[DefenseDecision]]:
     decisions: List[DefenseDecision] = []
     runtime = current_runtime(normalize_method(method))
     if runtime is not None:
+        if hasattr(runtime, "observe_ingress"):
+            runtime.observe_ingress(entry, ingress_channel, requested_scope, target_agent_id, parent_entries)
         allowed, raw = runtime.admit(entry, requested_scope, target_agent_id)
         decisions.extend(official_communication_decisions_to_trace(raw, method, entry.origin_task, entry.origin_round))
         if not allowed:
             return False, decisions
-    derive_provenance_scores(entry)
+    if runtime is None or not hasattr(runtime, "observe_ingress"):
+        derive_provenance_scores(entry)
     wd = write_firewall(entry, method)
     decisions.append(wd)
     if wd.action in (ACTION_REJECT, ACTION_QUARANTINE, ACTION_BLOCK):
@@ -1711,6 +1730,8 @@ def commit_memory(
         if pd.action == ACTION_QUARANTINE and memory_backend is not None:
             memory_backend.add_quarantine(entry)
         return False, decisions
+    if runtime is not None and hasattr(runtime, "record_store"):
+        runtime.record_store(entry)
     if requested_scope == "team":
         entry.memory_scope = "team"
         if memory_backend is not None:
@@ -1808,13 +1829,13 @@ def consolidate_benign_memories(
         if isinstance(agent_outputs, dict):
             output = agent_outputs.get(agent_id, agent_outputs.get(str(agent_id)))
         m = create_benign_memory(task, agent_id, final_answer, success, phase, agent_output=output)
-        written, ds = commit_memory(m, "private", agent_id, method, private_memories, shared_memories, memory_backend)
+        written, ds = commit_memory(m, "private", agent_id, method, private_memories, shared_memories, memory_backend, ingress_channel='agent_output')
         decisions.extend(ds)
         if written and promote_benign_to_shared and agent_id == 0:
             team_entry = create_benign_memory(task, agent_id, final_answer, success, f"{phase}_team", agent_output=output)
             team_entry.allowed_agents = list(range(num_agents))
             team_entry.provenance_trust = max(team_entry.provenance_trust, 0.8)
-            _ok, ds2 = commit_memory(team_entry, "team", agent_id, method, private_memories, shared_memories, memory_backend)
+            _ok, ds2 = commit_memory(team_entry, "team", agent_id, method, private_memories, shared_memories, memory_backend, ingress_channel='agent_output')
             decisions.extend(ds2)
     return decisions
 
@@ -2154,6 +2175,9 @@ def majority_vote_with_exclusions(outputs: Dict[int, str], excluded_agent_ids: S
 
 
 def _memory_parent_value(entry: MemoryEntry, prefix: str) -> str:
+    metadata = getattr(entry, "baseline_metadata", {})
+    if "operational" in metadata:
+        return str(metadata.get("history_display", {}).get(prefix, ""))
     needle = f"{prefix}="
     for parent in getattr(entry, "parents", []) or []:
         raw = str(parent)
@@ -2230,7 +2254,7 @@ def render_memory_context(memories: Sequence[MemoryEntry], method: str) -> str:
             + json.dumps(items, ensure_ascii=False, indent=2)
         )
     lines = []
-    if method_uses_maple_guard_lifecycle(method):
+    if strict_runtime_active() or method_uses_maple_guard_lifecycle(method) or method == METHOD_MAPLE_RETRIEVAL_ONLY:
         lines.append("Retrieved long-term memory from previous tasks:")
         for idx, m in enumerate(memories, 1):
             lines.append(
@@ -2267,7 +2291,9 @@ def retrieve_for_agent(
     min_score: float,
     memory_backend: Optional[Any] = None,
     disable_private_memory: bool = False,
+    candidate_filter=None,
 ) -> Tuple[List[MemoryEntry], List[RetrievalDecision], List[DefenseDecision]]:
+    runtime = current_runtime(normalize_method(method))
     task_class = infer_task_class(task)
     retrieval_query = str(getattr(task, "_retrieval_query", "") or task.question)
     if memory_backend is not None:
@@ -2277,6 +2303,8 @@ def retrieve_for_agent(
             candidates.extend(memory_backend.retrieve_private(agent_id, retrieval_query, backend_k, max(min_score, 0.0), method=method, task_class=task_class))
         broker_decisions: List[DefenseDecision] = []
         for m in memory_backend.retrieve_shared(retrieval_query, backend_k, max(min_score, 0.0), method=method, agent_id=agent_id, task_class=task_class):
+            if runtime is not None and hasattr(runtime, "prepare_entries"):
+                runtime.prepare_entries([m])
             if not shared_visible_by_topology(m, agent_id, memory_topology, num_agents):
                 continue
             bd = broker_decision(m, agent_id, method, memory_topology, task.task_id)
@@ -2286,12 +2314,29 @@ def retrieve_for_agent(
     else:
         candidates, broker_decisions = visible_memories(private_memories, shared_memories, agent_id, method, memory_topology, num_agents, task.task_id, disable_private_memory)
     runtime = current_runtime(normalize_method(method))
+    if runtime is not None and hasattr(runtime, "prepare_entries"):
+        runtime.prepare_entries(candidates)
+    if candidate_filter is not None:
+        candidates = list(candidate_filter(candidates))
     if runtime is not None:
         candidates, raw = runtime.filter_entries(candidates, agent_id)
         broker_decisions.extend(official_communication_decisions_to_trace(raw, method, task.task_id, 0))
     suppressed_memory_ids = set(getattr(task, "_suppressed_memory_ids", []))
     candidates = [m for m in candidates if m.memory_id not in suppressed_memory_ids]
-    q_emb = remote_embedding(retrieval_query, embed_base_url, embed_model) or hash_embedding(retrieval_query)
+    if normalize_method(method) == "amemguard_full":
+        # The released algorithm owns semantic top-k, independent paths and
+        # validation. Do not pre-rank with MAPLE's Q/risk scorer.
+        selected, raw = runtime.validate_retrieval(candidates, retrieval_query, agent_id)
+        broker_decisions.extend(official_communication_decisions_to_trace(raw, method, task.task_id, 0))
+        for m in selected:
+            m.retrieved_count += 1
+            m.selected_count += 1
+            m.last_used = time.time()
+        return selected, [], broker_decisions
+    q_emb = remote_embedding(retrieval_query, embed_base_url, embed_model)
+    if not q_emb and strict_runtime_active():
+        raise RuntimeError("Strict comparison query embedding failed; hash fallback is disabled")
+    q_emb = q_emb or hash_embedding(retrieval_query)
     cluster_shares = memory_cluster_shares(candidates)
     decisions: List[RetrievalDecision] = []
     scored: List[Tuple[float, MemoryEntry]] = []
@@ -2334,6 +2379,15 @@ def retrieve_for_agent(
             scored.append((score, m))
     scored.sort(key=lambda x: x[0], reverse=True)
     selected = [m for _, m in scored[:top_k]]
+    if runtime is not None and hasattr(runtime, "validate_retrieval"):
+        before = {m.memory_id for m in selected}
+        selected, raw = runtime.validate_retrieval(selected, retrieval_query, agent_id)
+        kept = {m.memory_id for m in selected}
+        for decision in decisions:
+            if decision.memory_id in before - kept:
+                decision.blocked = True
+                decision.reason = "amemguard_consensus_rejected"
+        broker_decisions.extend(official_communication_decisions_to_trace(raw, method, task.task_id, 0))
     for m in selected:
         m.retrieved_count += 1
         m.selected_count += 1
@@ -2512,7 +2566,7 @@ def commit_round_dialogue_memories(
                 private_memories,
                 shared_memories,
                 memory_backend,
-            )
+             ingress_channel='peer_message')
             decisions.extend(ds)
             if written:
                 ids_by_source.setdefault(str(src_agent_id), []).append(entry.memory_id)
@@ -2612,7 +2666,7 @@ def commit_pre_round_memory_handoffs(
                 private_memories,
                 shared_memories,
                 memory_backend,
-            )
+             ingress_channel='peer_message', parent_entries=memories)
             decisions.extend(ds)
             if written:
                 ids_by_source.setdefault(str(src_agent_id), []).append(entry.memory_id)
@@ -2844,6 +2898,8 @@ def run_task(
     runtime = current_runtime(args.method)
     if runtime is not None:
         runtime.begin_task(task.task_id, format_question(task))
+        if hasattr(runtime, "observe_task_inputs"):
+            runtime.observe_task_inputs(task.raw)
 
     if args.retrieval_mode == "once":
         for agent_id in range(args.agents):
@@ -2968,9 +3024,12 @@ def run_task(
         for memories in selected_by_agent.values():
             for m in memories:
                 m.update_outcome(success)
-                derive_provenance_scores(m)
+                if runtime is None or not hasattr(runtime, "record_feedback"):
+                    derive_provenance_scores(m)
                 if memory_backend is not None:
                     memory_backend.update_value(m, success)
+                if runtime is not None and hasattr(runtime, "record_feedback"):
+                    runtime.record_feedback(m)
 
     trace = TaskRunTrace(
         phase=phase,
@@ -3615,7 +3674,7 @@ def run_episode(
                         getattr(args, "attack_stealth_mode", STEALTH_METADATA_CLEAN),
                     )
                     poisoned_ids.append(poison_item.memory_id)
-                    written, poison_dds = commit_memory(poison_item, "private", args.target_agent_id, args.method, private_memories, shared_memories, memory_backend)
+                    written, poison_dds = commit_memory(poison_item, "private", args.target_agent_id, args.method, private_memories, shared_memories, memory_backend, ingress_channel='agent_output')
                     poison_written = poison_written or written
                     all_defense.extend(poison_dds)
         else:
@@ -4004,6 +4063,7 @@ def main() -> None:
                 log_progress(args, short_episode_status(ep_idx, max_eps, trace, time.time() - ep_start))
     summary_path = args.out.replace(".jsonl", ".summary.json")
     summary = summarize(traces)
+    summary["baseline_provenance"] = baseline_run_provenance(args)
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     log_progress(args, f"finish elapsed={time.time() - start_time:.1f}s summary={summary_path} metrics={summary}")

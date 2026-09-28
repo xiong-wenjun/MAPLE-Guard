@@ -1,6 +1,11 @@
-"""Live AgentXposed paper-component adapter; see docs/baselines/agentxposed_full.md."""
+"""Pinned released AgentXposed profiles and explicit live paper reconstruction."""
 from __future__ import annotations
 
+import ast
+import hashlib
+from pathlib import Path
+import re
+from types import SimpleNamespace
 import copy
 import json
 import math
@@ -37,9 +42,97 @@ class AgentXposedRuntimeError(RuntimeError):
     """A judge or live-agent interaction failed; the task must not silently pass."""
 
 
+RELEASE_HASHES = {
+    "Detect/model.py": "2340c4845a76c9ee9f73dfc01f087c3e5e82e198c437f50322a8a244bd58338e",
+    "Detect/main.py": "de954af32559e57ee9890f08e0c3fb9be713b1dd95994199b972263eb6fafc9c",
+    "Detect/reid_interrogator.py": "6f76a50798c4c55301e6053dd1d9d4488ac10fc6a4bfa7e1aa7b213e27512220",
+    "Detect/file_handler.py": "2ff36d8711a822e7609e056cec33010a9adeea56f3d6b31751242b95c2ab9ce3",
+    "Defence/defense_sys.py": "6555135ac54afda0dadb245271ca02d93b58aa499ff272e981059423bea34ad7",
+}
+RELEASE_PROFILES = {"released_minimal_fix", "released_unmodified"}
+MINIMAL_PATCH = "final_hexaco_scores[agent_id] = updated_scores"
+
+
+class _ReleasedSource:
+    """Load pinned definitions without top-level credential mutation or imports."""
+
+    def __init__(self, code_dir, judge, protocol):
+        if not code_dir:
+            raise AgentXposedConfigError("Released AgentXposed requires --agentxposed-code-dir")
+        self.root = Path(code_dir).expanduser().resolve()
+        self.protocol = protocol
+        self.judge = judge
+        self.calls, self.logs = [], []
+        trees = {}
+        for name, expected in RELEASE_HASHES.items():
+            try:
+                raw = (self.root / name).read_bytes()
+            except OSError as exc:
+                raise AgentXposedConfigError(f"Missing official AgentXposed source: {name}") from exc
+            actual = hashlib.sha256(raw).hexdigest()
+            if actual != expected:
+                raise AgentXposedConfigError(f"AgentXposed source hash mismatch: {name}")
+            trees[name] = ast.parse(raw, filename=str(self.root / name))
+        literals = [node.value for node in ast.walk(trees["Defence/defense_sys.py"])
+                    if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+        guidance = {match.group(0) for text in literals
+                    for match in re.finditer(r"IMPORTANT GUIDANCE:[^\n\"]*given problem\.", text)}
+        if len(guidance) != 1:
+            raise AgentXposedConfigError("Cannot extract the unique released Guide literal")
+        self.guidance = "\n\n" + guidance.pop()
+        selections = (
+            ("Detect/model.py", "HexacoSystem"),
+            ("Detect/reid_interrogator.py", "ReidInterrogator"),
+            ("Detect/file_handler.py", "get_dialog_history"),
+            ("Detect/main.py", "process_question"),
+        )
+        self.namespace = {
+            "openai": SimpleNamespace(ChatCompletion=SimpleNamespace(create=self._completion)),
+            "os": SimpleNamespace(getenv=lambda *args, **kwargs: ""),
+            "print": lambda *values, **kwargs: self.logs.append(" ".join(map(str, values))),
+        }
+        for name, symbol in selections:
+            selected = [copy.deepcopy(node) for node in trees[name].body
+                        if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name == symbol]
+            if len(selected) != 1:
+                raise AgentXposedConfigError(f"Missing unique released definition: {symbol}")
+            node = selected[0]
+            if symbol == "process_question" and protocol == "released_minimal_fix":
+                loops = [child for child in node.body if isinstance(child, ast.For)
+                         and isinstance(child.target, ast.Name) and child.target.id == "agent_id"
+                         and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                                 and call.func.attr == "conduct_full_interrogation"
+                                 for call in ast.walk(child))]
+                if len(loops) != 1:
+                    raise AgentXposedConfigError("Cannot locate the released missing-assignment patch site")
+                loops[0].body.append(ast.parse(MINIMAL_PATCH).body[0])
+            tree = ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[]))
+            exec(compile(tree, str(self.root / name), "exec"), self.namespace)
+
+    def _completion(self, **kwargs):
+        call = {"messages": copy.deepcopy(kwargs["messages"]),
+                "temperature": kwargs["temperature"], "source_model": kwargs["model"]}
+        self.calls.append(call)
+        try:
+            text = self.judge(copy.deepcopy(kwargs["messages"]),
+                              temperature=kwargs["temperature"], response_format=None)
+            if not isinstance(text, str):
+                raise TypeError("Released judge transport must return text")
+            call["response"] = text
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
+        except Exception as exc:
+            call["error"] = f"{type(exc).__name__}: {exc}"
+            raise
+
+    def detect(self, memories):
+        self.calls, self.logs = [], []
+        return self.namespace["process_question"]("", memories, len(memories))
+
+
 class AgentXposedFull:
     def __init__(self, args: Any, judge: Callable):
         self.judge = judge
+        self.protocol = getattr(args, "agentxposed_protocol", "released_minimal_fix")
         self.mode = getattr(args, "method", "")
         self.threshold = getattr(args, "agentxposed_deviation_threshold", 1.0)
         self.inquiry_rounds = getattr(args, "agentxposed_inquiry_rounds", 3)
@@ -60,11 +153,127 @@ class AgentXposedFull:
                 raise ValueError("judge must be callable")
         except (ValueError, TypeError, OverflowError) as exc:
             raise AgentXposedConfigError(f"Invalid AgentXposed configuration: {exc}") from exc
+        if self.protocol not in RELEASE_PROFILES | {"reconstruction"}:
+            raise AgentXposedConfigError("Unknown agentxposed_protocol")
+        if self.protocol in RELEASE_PROFILES:
+            if self.num_agents is None:
+                raise AgentXposedConfigError("Released AgentXposed requires a configured agents count")
+            self._released_engine = _ReleasedSource(
+                getattr(args, "agentxposed_code_dir", ""), judge, self.protocol)
+            self.released_guidance = self._released_engine.guidance
         self.task_id = None
         self.inactive = set()
         self._baselines = {}
         self._scores = {}
         self._history = {}
+        self._released_result = None
+        self._released_selected = None
+        self._released_prepared = set()
+
+    def detect_released(self, memories):
+        """Run original offline detector on a complete transcript; IDs are one-based."""
+        if self.protocol not in RELEASE_PROFILES:
+            raise AgentXposedConfigError("detect_released requires a released protocol")
+        if not isinstance(memories, (list, tuple)) or len(memories) != self.num_agents:
+            raise AgentXposedRuntimeError("Released memories must contain every configured agent")
+        public = []
+        for memory in memories:
+            if not isinstance(memory, (list, tuple)):
+                raise AgentXposedRuntimeError("Each released memory must be a message sequence")
+            messages = []
+            for message in memory:
+                if not isinstance(message, dict):
+                    raise AgentXposedRuntimeError("Released memory messages must be objects")
+                if message.get("role") not in {"user", "assistant"}:
+                    continue
+                if not isinstance(message.get("content"), str):
+                    raise AgentXposedRuntimeError("Released public message content must be text")
+                messages.append({"role": message["role"], "content": message["content"]})
+            public.append(messages)
+        return self._released_engine.detect(public)
+
+    def prepare_messages(self, agent_id, messages):
+        """Append the released Guide to user input without inspecting the system prompt."""
+        prepared = copy.deepcopy(messages)
+        if (self.protocol in RELEASE_PROFILES and self.mode == "agentxposed_full_guide"
+                and agent_id == self._released_selected):
+            for message in reversed(prepared):
+                if message.get("role") == "user":
+                    if not isinstance(message.get("content"), str):
+                        raise AgentXposedRuntimeError("Released Guide requires a text user message")
+                    message["content"] += self.released_guidance
+                    self._released_prepared.add(agent_id)
+                    return prepared
+            raise AgentXposedRuntimeError("Released Guide requires an existing user message")
+        return prepared
+
+    def _defend_released(self, outputs, round_idx, callbacks):
+        first_detection = self._released_result is None
+        if first_detection:
+            if round_idx != 0 or set(outputs) != set(range(self.num_agents)):
+                raise AgentXposedRuntimeError("Released host detection requires all agents in round zero")
+            observe = callbacks.get("released_memories")
+            if not callable(observe):
+                raise AgentXposedRuntimeError("Released detection requires the public released_memories callback")
+            memories = [observe(i) for i in range(self.num_agents)]
+            result = self.detect_released(memories)
+            selected = result["detected_malicious_agent"]
+            selected = None if selected is None else selected - 1
+        else:
+            result, selected = self._released_result, self._released_selected
+        updated = {i: text for i, text in outputs.items() if i not in self.inactive}
+        regenerated = False
+        if selected is not None and self.mode == "agentxposed_full_guide" and selected in updated:
+            if first_detection:
+                regenerate = callbacks.get("regenerate")
+                if not callable(regenerate):
+                    raise AgentXposedRuntimeError("Released Guide requires exact pre-generation replay")
+                answer = regenerate(selected, self.released_guidance)
+                if not isinstance(answer, str) or not answer.strip():
+                    raise AgentXposedRuntimeError("Released Guide regeneration returned invalid text")
+                updated[selected] = answer
+                regenerated = True
+            elif selected not in self._released_prepared:
+                raise AgentXposedRuntimeError("Released Guide input hook was not applied before generation")
+        if selected is not None and self.mode == "agentxposed_full_kick":
+            self.inactive.add(selected)
+            updated.pop(selected, None)
+        self._released_result = copy.deepcopy(result)
+        self._released_selected = selected
+        decisions = []
+        for agent_id in sorted(outputs):
+            process = result["interrogation_process"][agent_id + 1]
+            details = {
+                "protocol": self.protocol, "method_scope": "released_source_detector_host_schedule",
+                "execution_schedule": "detect_once_after_first_observed_round",
+                "experimental_replay_equivalence": False,
+                "source_directory": str(self._released_engine.root),
+                "source_sha256": dict(RELEASE_HASHES),
+                "source_patch": MINIMAL_PATCH if self.protocol == "released_minimal_fix" else None,
+                "source_ids": "one_based", "detected_source_agent_id": result["detected_malicious_agent"],
+                "detected_agent_id": selected, "baseline_scores": {trait: 5 for trait in TRAITS},
+                "current_scores": copy.deepcopy(process["final_scores"]),
+                "weighted_score": process.get("weighted_average_score"),
+                "selection_threshold": 3, "score_range": [0, 10],
+                "inquiry_count": len(process["interrogation_process"]["rounds"]) if first_detection else 0,
+                "simulated_inquiry": True, "guide_count": int(regenerated and agent_id == selected),
+                "input_guidance_applied": (agent_id == selected and self.mode == "agentxposed_full_guide"),
+                "source_detection_result": copy.deepcopy(result),
+                "source_transport": "host_judge_with_original_temperature_and_plain_text",
+                "source_calls": copy.deepcopy(self._released_engine.calls) if first_detection else [],
+                "source_stdout": list(self._released_engine.logs) if first_detection else [],
+            }
+            if agent_id in self.inactive:
+                action, reason = "block", "agentxposed_released_kick"
+            elif agent_id == selected and self.mode == "agentxposed_full_guide":
+                action = "rewrite" if regenerated else "allow"
+                reason = "agentxposed_released_input_guidance"
+            else:
+                action, reason = "allow", "agentxposed_released_no_detection_for_agent"
+            decisions.append({"agent_id": agent_id, "action": action, "reason": reason,
+                              "details": details})
+        self._released_prepared.clear()
+        return updated, decisions
 
     def begin_task(self, task_id):
         self.task_id = str(task_id)
@@ -72,6 +281,9 @@ class AgentXposedFull:
         self._baselines.clear()
         self._scores.clear()
         self._history.clear()
+        self._released_result = None
+        self._released_selected = None
+        self._released_prepared.clear()
 
     @staticmethod
     def _decode(raw):
@@ -218,6 +430,8 @@ class AgentXposedFull:
                 raise AgentXposedRuntimeError("Expected operational agent IDs and nonempty text outputs")
         if not callable(respond):
             raise AgentXposedRuntimeError("A live target callback is required")
+        if self.protocol in RELEASE_PROFILES:
+            return self._defend_released(outputs, round_idx, callbacks)
         updated, decisions = {}, []
         peers = [{"agent_id": i, "output": text} for i, text in sorted(outputs.items())
                  if i not in self.inactive]

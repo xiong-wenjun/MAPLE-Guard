@@ -88,6 +88,7 @@ class FullRunnerWiringTests(unittest.TestCase):
         from evaluate.defense_methods.infa_full import InfaGuardFull
         args=self.args()
         args.method="infa_guard_full"
+        args.infa_protocol="reconstruction"
         args.agents=3
         args.communication_topology="full"
         args.rounds=2
@@ -131,7 +132,7 @@ class MemoryHookTests(unittest.TestCase):
             allowed, decisions=ep.commit_memory(self.entry(),"team",0,args.method,private,shared)
         self.assertFalse(allowed)
         self.assertEqual(shared,[])
-        self.assertEqual(guard.received, {"memory_id","text","owner","recipient","metadata"})
+        self.assertEqual(guard.received, {"memory_id","text","owner","recipient","metadata","holder"})
 
     def test_handoff_is_blocked_before_receiver_summarization(self):
         class Guard:

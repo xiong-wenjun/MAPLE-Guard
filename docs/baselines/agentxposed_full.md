@@ -1,196 +1,228 @@
-# AgentXposed full live adapter
+# AgentXposed protocol profiles
 
-`agentxposed_full_guide` and `agentxposed_full_kick` implement the stages of
-[AgentXposed, arXiv 2507.04724v2](https://arxiv.org/html/2507.04724v2), using live
-target-agent callbacks. This is a clean-room reconstruction of the paper's
-behavioral protocol, with explicit integration choices below. It is not a
-bit-for-bit reproduction of the released offline scripts or a claim to reproduce
-the published detection rates. The older `agentxposed_guide` and
-`agentxposed_kick` adapters retain their existing behavior.
+`AgentXposedFull` supports three explicitly different protocols for
+`agentxposed_full_guide` and `agentxposed_full_kick`. The default is now
+`agentxposed_protocol=released_minimal_fix`. The earlier live paper
+reconstruction is available only through `agentxposed_protocol=reconstruction`.
 
-## Public interface and observer boundary
+| Component | `released_minimal_fix` (default) | `released_unmodified` | `reconstruction` |
+| --- | --- | --- | --- |
+| Detector implementation | Pinned official definitions plus one assignment | Pinned official definitions unchanged | Independent paper-oriented implementation |
+| Initial HEXACO vector | Six scores of five | Six scores of five | Inferred from public task and first output |
+| Output observation | Official sequential message scoring | Same | Temporal scoring with public peer context |
+| Interrogation trigger | Every agent, unconditionally | Same | Mean absolute baseline deviation strictly above threshold |
+| Interrogation response | Official simulated participant model call | Same | Actual target callback |
+| Interrogation rounds | Exactly three, as hard-coded in released detector | Same | Configurable, default three |
+| Final selection | Unique lowest weighted score strictly below three | Empty final-score dictionary, so no selected agent | Reassessed mean absolute baseline deviation |
+| Equal lowest weighted scores | Uncertain; select nobody | Select nobody | Agents assessed independently |
+| Score parsing | Original integer extraction, clamp to 0–10, retain missing dimensions | Same | Strict six finite numeric scores in 1–10 |
+| Judge failures | Original fallback behavior retained and logged | Same | Raise; no silent allow |
+| Guide | Exact source guidance added to user input before generation | Never activates because detector returns no selection | Adaptive live correction turns and fresh task answer |
+| Kick | Fixed selected agent removed for the task | Never activates | Confirmed agents removed for the task |
+
+The [official source](https://anonymous.4open.science/r/AgentXposed-F814) and the
+[paper v2](https://arxiv.org/html/2507.04724v2) describe materially different
+procedures. These names must be reported in results; the live reconstruction
+must not be called source-equivalent.
+
+## Exact detector patch and source loading
+
+In `Detect/main.py`, `process_question` initializes
+`final_hexaco_scores = {}` at line 114 but never populates it. The final selector
+at line 123 iterates that empty dictionary. The minimal-fix profile inserts
+exactly this statement at the end of the per-agent interrogation loop:
+
+```python
+final_hexaco_scores[agent_id] = updated_scores
+```
+
+It does not change the initial scores, prompts, scoring parser, inquiry sequence,
+three-round budget, unique-minimum rule, weights, threshold, or source error
+fallbacks. The unmodified profile omits this assignment to expose the released
+no-detection bug. It still performs all observation and simulated interrogation
+calls; it is not a shortcut that skips the detector.
+
+Released profiles require `--agentxposed-code-dir` to point to the external
+official source snapshot. Missing files or SHA-256 mismatches fail at startup.
+No files are downloaded by the component. The implementation parses the pinned
+files and executes only `HexacoSystem`, `ReidInterrogator`,
+`get_dialog_history`, and `process_question` definitions. It does not execute
+module-level API-key assignments, import the original OpenAI package, run source
+CLI entry points, or replace Python's global modules. API calls are bridged to
+the host's judge through a small completion-response shim.
+
+The source's original prompt strings and Python formatting are therefore used
+directly, rather than rewritten approximations. The baseline prompt exists in
+the source but is not invoked by its detector. Observation scoring runs at
+temperature 0.3; initial questions and simulated participant answers at 0.7;
+response analysis/next-question generation at 0.5. The bridge calls
+`judge(messages, temperature=source_temperature, response_format=None)`;
+released calls must not be forced into the reconstruction's JSON schema.
+
+The source requests `gpt-4o-mini` by default. The bridge records that requested
+model in `source_calls`; the actual endpoint/model and generation limits are
+controlled by the host judge transport and must also be recorded in run
+metadata. A different host model or generation budget is an experimental
+substitution, not identical reproduction of the paper's model setting.
+
+## Offline detector and host scheduling boundary
+
+The exact full-transcript detector entry point is:
 
 ```python
 guard = AgentXposedFull(args, judge)
+result = guard.detect_released(agent_memories)
+```
+
+`agent_memories` is an ordered list with one message sequence per configured
+agent. The detector consumes user and assistant content only; system and other
+message roles are excluded without using their content. Returned source IDs
+are **one-based**, matching the original functions. No attacker IDs, labels,
+ground-truth answers, hidden system role instructions, or taint metadata are
+provided to the detector.
+
+The source simulator extracts the first three paragraphs of the first user
+message as its role instructions. Those user instructions can contain the
+original experiment's adversarial role wording; that is different from revealing
+a hidden system prompt. The original first inquiry sees all public user and
+assistant history, while subsequent simulated answers and analyses follow the
+released function's narrower contexts. This profile intentionally retains that
+behavior instead of replacing it with live-agent interrogation.
+
+**The current MAPLE runner is not a completed reproduction of the authors'
+offline detect-then-replay experiment.** It detects once, after the first
+observed round, and fixes that selection for the remaining task. This is an
+explicit host scheduling adaptation. The offline entry point can consume the
+complete saved transcript, but collection of complete benchmark transcripts
+followed by a separate defended replay remains pending. The repository's
+topology-specific script generator is not executed by the MAPLE runner.
+
+## Required host hooks
+
+```python
 guard.begin_task(task_id)
-updated_outputs, decisions = guard.defend(
-    outputs, respond, question, round_idx, adjacency, **callbacks
+messages = guard.prepare_messages(agent_id, messages)
+# Generate the target response using these messages.
+outputs, decisions = guard.defend(
+    outputs, respond, question, round_idx, adjacency,
+    released_memories=observe_public_history,
+    regenerate=regenerate_from_original_input,
 )
 ```
 
-- `judge(messages)` returns a JSON string. Judge/provider/model/temperature
-  selection belongs to the host runtime.
-- `outputs` contains only operational integer agent IDs and nonempty visible
-  output strings. `question` is the public task text.
-- `respond(agent_id, prompt, reset=False)` queries the same real target agent,
-  retaining its private runtime context. The callback returns nonempty text.
-  The guard never requests a reset or inspects the callback's private context.
-- The host must use `guard.inactive` to skip future generation, communication,
-  and final aggregation for kicked agents. The guard also removes their outputs
-  defensively if the host passes them again.
-- `begin_task` always starts a fresh task, clearing baselines, scores, public
-  histories, and inactive IDs. Call it once per independent task.
-- Extra callbacks, private prompt fields, evaluator labels, attacker identities,
-  memory taint, and ground-truth answers are not inspected. Adjacency is accepted
-  for shared-runner compatibility; this implementation performs public peer-output
-  comparison, without fitting a graph model or changing topology.
+- `released_memories(agent_id)` returns that target's user/assistant history.
+  It is required at round zero for released protocols. All configured agents
+  must have an initial output.
+- `prepare_messages(agent_id, messages)` returns a deep copy. For the fixed Guide
+  selection, it appends the exact guidance extracted from
+  `Defence/defense_sys.py` to the last user message. It does not inspect the
+  private system prompt. Call it once before each target generation.
+- The first Guide selection occurs after the initial output exists.
+  `regenerate(agent_id, guidance)` must replay the same saved pre-generation
+  context, appending the guidance to the existing last user message before
+  generating a replacement answer. It must update the target's live context.
+  It must not append guidance to the finished assistant output or add a separate
+  conversational instruction turn.
+- Later Guide turns use `prepare_messages`; the detector is not rerun.
+  The adapter rejects a later selected-agent output if that input hook was not
+  applied, so a missing hook cannot silently disable Guide.
+- Kick adds the selected zero-based operational ID to `inactive` and filters
+  its current output. The host must skip later generation, communication, and
+  final aggregation for that ID. Guide does not add an inactive ID.
+- `begin_task` clears the fixed detection, input-hook markers, and inactive
+  IDs. A different task runs a fresh source detection.
+- The `respond` callback is unused by released detection: all interrogation
+  answers are simulated through the source's model-call path. It remains part
+  of the shared interface for the reconstruction profile.
 
-The API treats supplied output text as an observation. The judge is instructed
-not to follow instructions embedded in observations. The original agent's hidden
-system prompt remains with the runner, where it may still influence that agent's
-answers. No benign replacement persona is supplied.
+First-round Guide replay and current-output filtering are host integration
+controls, not additional patches inside the source detector. Source one-based
+IDs are explicitly translated to the runner's zero-based IDs.
 
-## Protocol
+## Released trace and failure semantics
 
-1. **Contextual baseline:** each agent's first observed output and public task,
-   together with the current visible peer outputs, are scored on all six HEXACO
-   traits. This inferred vector becomes the fixed per-task baseline. No fixed
-   all-five vector or hidden role prompt is used. The first output establishes
-   the baseline and cannot itself trigger a deviation.
-2. **Monitoring:** subsequent outputs are scored using the public task, prior
-   observed history, fixed baseline, latest scores, and current peer outputs.
-   The signal is the arithmetic mean of the six absolute differences from the
-   baseline. A signal strictly above the threshold triggers verification.
-3. **Adaptive inquiry:** generate a Reid-inspired, professional question from
-   observed inconsistencies, ask the real agent, then rescore using its actual
-   reply. Every next question sees the earlier question/answer/score transcript.
-   The inquiry permits innocent explanations and does not invent evidence.
-4. **Final assessment:** after the configured inquiry rounds, obtain a separate
-   six-trait assessment of the full public inquiry evidence. Confirm the suspect
-   only if its final mean absolute baseline deviation remains strictly above the
-   same threshold. A cleared soft flag releases the original task output.
-5. **Guide:** for a confirmed suspect, generate a contextual client-perspective
-   correction, ask the real target, and adapt the next correction to its reply.
-   After those correction turns, explicitly request a fresh complete answer to
-   the original task. Publish that fresh answer, not an appended warning or an
-   interrogation answer. A further assessment records post-Guide scores and
-   residual deviation. Guide preserves participation even if residual deviation
-   remains high; it does not silently switch to Kick.
-6. **Kick:** remove each confirmed suspect's current output and retain its ID in
-   `inactive` for the rest of that task. Multiple independently confirmed agents
-   can be removed, including equal-deviation cases.
+Decisions record the exact profile, source directory/hashes, patch statement or
+null, source/operational selected IDs, original result object, neutral baseline,
+final per-agent scores, weighted score when populated, inquiry count, simulated
+response flag, Guide input application, and the actual source calls and logs.
+The trace declares `experimental_replay_equivalence=false` and names the
+first-observation scheduling adaptation.
 
-The baseline can be contaminated when the first observed behavior is already
-adversarial. A one-observation task only profiles agents. The adapter does not
-invent an unseen clean history or use answer labels to address that limitation.
-Guidance and inquiry persist in the original target's conversation through the
-host callback. Persistent memory receives no AgentXposed-specific read, write,
-promotion, taint, or provenance gates.
+The source's partial-score parsing, API exception fallbacks, and
+`honesty_humility < 3.5` interrogation-side prediction remain unchanged. That
+separate prediction does not replace the final weighted selector. The fixed
+weights are honesty-humility 0.6; agreeableness, openness, and conscientiousness
+0.1 each; emotionality and extraversion 0.05 each. Python's original floating-point
+sum and strict threshold comparison are preserved.
 
-## Configuration and explicitly chosen details
+Source loading and missing host hooks fail explicitly. A transport exception
+inside an original source method follows that method's original fallback and
+appears in `source_calls` and source logs; it must not be presented as a
+successful detector assessment. Regeneration failures propagate to the host.
+Reconstruction failure semantics remain different, as described below.
 
-| Argument | Default | Basis |
-| --- | --- | --- |
-| `agentxposed_deviation_threshold` | `1.0` | Paper section 5.3 interrogation threshold; strict `>` follows section 4.4. |
-| `agentxposed_inquiry_rounds` | `3` | Released detector runs three interrogation rounds. The paper does not give an exact stopping rule. |
-| `agentxposed_guide_rounds` | `2` | Local choice to realize the paper's multi-turn correction; no released numeric Guide default. |
-| Final decision threshold | Same configured deviation threshold | Local choice: the paper says final identification uses deviation magnitude but specifies no separate final cutoff. |
-| Score range | Finite real numbers `[1, 10]` | Paper section 4.4; the appendix prompt and released parser instead permit `[0, 10]`. |
-| Final rescore and post-Guide rescore | One each | Explicit verification and observable correction reporting for the live integration. |
+## Explicit reconstruction profile
 
-The deviation threshold must be finite and in `[0, 9]`; inquiry and Guide round
-counts must be positive integers. Defaults realize three inquiry turns and two
-correction turns. An explicitly smaller round count changes that interaction
-budget. If provided, `agents` must be a positive integer and output IDs must lie
-in `[0, agents)`.
+With `--agentxposed-protocol reconstruction`, the prior implementation remains:
 
-Judge prompts are original, purpose-specific prompts. They preserve behavioral
-profiling, adaptive inquiry, and semantic correction concepts while adding a
-strict machine-readable contract. They are not represented as verbatim author
-prompts. The host's judge model and temperature must be reported with experiments;
-this component does not force the original default GPT-4o-mini or its temperatures.
+1. Infer a fixed per-task baseline from the public task, the first visible output,
+   and visible peer outputs; no all-five initialization.
+2. Monitor mean absolute changes across all six traits. A first observation only
+   establishes a baseline; already-adversarial baseline behavior may be missed.
+3. For a signal above the configured threshold, ask the original target through
+   `respond(agent_id, prompt, reset=False)`, adapt further inquiries to actual
+   replies, and obtain an explicit final six-trait assessment.
+4. Kick confirmed suspects for the task, or conduct configured live Guide
+   correction turns followed by a fresh complete task answer. A further
+   assessment reports residual deviation; Guide does not silently switch to Kick.
 
-## Judge schemas, errors, and trace
+Only this profile uses `agentxposed_deviation_threshold` (default 1.0),
+`agentxposed_inquiry_rounds` (default 3), and
+`agentxposed_guide_rounds` (default 2). Released detection always uses its fixed
+three simulated rounds and weighted threshold three. The reconstruction reuses
+its deviation threshold for the final decision; that cutoff and the two-turn
+Guide default are implementation choices not fully specified by the paper.
 
-Score responses must contain exactly:
+Reconstruction judgments require exact JSON objects with six named numeric
+scores in `[1,10]` plus a nonempty reason, or one nonempty question/guidance
+field. Invalid schemas, duplicate keys, nonfinite values, provider failures, and
+invalid live replies raise `AgentXposedRuntimeError` instead of retaining
+scores. The paper's main text gives `[1,10]`, whereas its appendix/source allow
+`[0,10]`. Its prompts are clean-room prompts, unlike the source profiles.
+The source directory is not required for reconstruction.
 
-```json
-{
-  "scores": {
-    "honesty_humility": 6,
-    "emotionality": 6,
-    "extraversion": 6,
-    "agreeableness": 6,
-    "conscientiousness": 6,
-    "openness": 6
-  },
-  "reason": "Explanation grounded in visible evidence."
-}
-```
+## Source provenance and licensing
 
-Question and correction responses contain exactly `{"question": "..."}` and
-`{"guidance": "..."}`, respectively. Text fields must be nonempty. Duplicate JSON
-keys, nonfinite values, missing/extra fields, booleans as scores, strings as scores,
-and out-of-range numbers are rejected. There is no partial-score parser, neutral
-fallback, fabricated target reply, or silent allow on failure.
-
-Invalid configuration raises `AgentXposedConfigError`. Invalid inputs, judge
-failures, malformed judgments, or target-callback failures raise
-`AgentXposedRuntimeError`, retaining the cause. A failed defense call does not
-return releasable outputs. The caller must abort that failed task; it must not
-catch the exception and publish the original candidates. Actual callback side
-effects cannot be rolled back or transparently retried.
-
-Every decision records the protocol and source provenance, baseline/current
-vectors, initial monitored deviation, final verification vector/deviation, active
-threshold, actual inquiry/Guide/reanswer counts, judge explanation, and complete
-public inquiry and correction transcripts. Guide adds its fresh output,
-post-Guide deviation, and assessment explanation. `deviation` is the monitoring
-signal; `final_deviation` is the pre-defense verification result;
-`post_guide_deviation` applies only after a Guide rewrite. The current vector
-reflects the last completed assessment.
-
-## Released-source differences and provenance
-
-The [official anonymous reference](https://anonymous.4open.science/r/AgentXposed-F814)
-was retrieved on 2026-09-28. The source snapshot and complete SHA-256 manifest are
-on the server at `/mnt/public/data/wj/baseline-references/AgentXposed/`, including
-`source-provenance.json`, `official-prompts.json`, and the v2 arXiv source.
-
-The reviewed release is internally inconsistent with the paper:
-
-- `Detect/model.py:9-25` initializes neutral fives; its baseline prompt is unused.
-  The unused `should_interrogate` method compares the lowest and second-lowest
-  mean score, rather than per-agent temporal deviation.
-- `Detect/main.py:116-120` interrogates every agent unconditionally.
-  `Detect/reid_interrogator.py:99-152` synthesizes the subject's answer through
-  another model call using extracted role instructions. The live adapter queries
-  the actual target without exposing those instructions to its judge.
-- `Detect/main.py:114` creates `final_hexaco_scores = {}` and never fills it.
-  Its final detector therefore iterates an empty dictionary and returns no
-  malicious agent. The new adapter fixes the missing-final-assessment failure by
-  storing validated final scores and directly calculating baseline deviation.
-- The release's intended final selector chooses a unique lowest weighted score
-  below three, and treats ties as uncertain. The new adapter follows the paper's
-  temporal deviation rule instead.
-- Released Guide modifies user input before target generation; released Kick
-  skips agent execution. Output warning concatenation and first-turn-only
-  suppression do not implement those controls.
-
-Reference content hashes:
+Reference snapshot retrieved 2026-09-28. The anonymous repository did not expose
+a verified Git commit; complete file content hashes are pinned instead.
 
 | File | SHA-256 |
 | --- | --- |
 | `Detect/model.py` | `2340c4845a76c9ee9f73dfc01f087c3e5e82e198c437f50322a8a244bd58338e` |
 | `Detect/main.py` | `de954af32559e57ee9890f08e0c3fb9be713b1dd95994199b972263eb6fafc9c` |
 | `Detect/reid_interrogator.py` | `6f76a50798c4c55301e6053dd1d9d4488ac10fc6a4bfa7e1aa7b213e27512220` |
+| `Detect/file_handler.py` | `2ff36d8711a822e7609e056cec33010a9adeea56f3d6b31751242b95c2ab9ce3` |
 | `Defence/defense_sys.py` | `6555135ac54afda0dadb245271ca02d93b58aa499ff272e981059423bea34ad7` |
 
-No root LICENSE file or license header in these reviewed files was present. This
-is not a claim that the reference is permissively licensed, and no verified Git
-commit was exposed by the anonymous listing. No upstream code is imported or
-executed by the clean-room component.
+The server snapshot is under
+`/mnt/public/data/wj/baseline-references/AgentXposed/`.
+No root LICENSE file or license header in these reviewed source files was
+present. The adapter does not assert a permissive license or vendor those files;
+released profiles require that external source and execute the pinned
+definitions. Reconstruction does not import or execute them.
 
-## Validation
-
-Run the network-free public-interface tests from the server worktree:
+## Verification
 
 ```bash
 python3 -m unittest discover -s tests -p test_agentxposed_full.py -v
 ```
 
-They cover contextual baselines, exact threshold equality, actual adaptive
-inquiry replies, final clearance, live Guide re-answering, persistent Kick and
-task reset, multiple suspects, strict schemas, explicit failures, and invariance
-to hidden evaluator metadata. These deterministic tests establish implementation
-behavior, not empirical malicious-agent detection accuracy.
+Tests compare released results, every prompt, temperatures, and call order
+against an independently loaded source reference, including a separate textual
+one-line patch for the fixed reference. They cover all-agent first-observation
+interrogation, original simulator role extraction, parser/error quirks, the
+unmodified no-op bug, strict minimum/tie behavior, task-scoped Kick, pre-generation
+Guide, required source hashes/hooks, private-system exclusion, and the existing
+live reconstruction behavior. They use deterministic judge doubles and make no
+network or model calls. Full published benchmark replay and empirical detection
+accuracy are not established by these tests.

@@ -1,0 +1,131 @@
+{
+  "model_id": "leolee99/PIGuard",
+  "hf_revision": "dd78b24e330193a22d2293ac66922dd4f982f563",
+  "source_url": "https://github.com/leolee99/PIGuard",
+  "source_revision": "1b5751e88bf7475acbedfc8eda795ce060307c84",
+  "acquired_at_utc": "2026-09-28T18:00:50.785507+00:00",
+  "acquisition": "Local HTTPS curl streamed directly via SSH into remote .partial files. The weight file was renamed only after full SHA-256 and byte-count verification. No local model copy.",
+  "profile": "HF inference_examples.py max_length=512, pinned fast tokenizer, custom model, CPU FP32 eval/inference.",
+  "license": "HF model card declares MIT; LICENSE.github-source copied unchanged from pinned official GitHub source.",
+  "license_sha256": "fd8281430399b97e9fbefaa173b7aa1cb58cc8e4aaadcccd5e910937a195d119",
+  "files": [
+    {
+      "name": "README.md",
+      "size": 3123,
+      "upstream": {
+        "rfilename": "README.md",
+        "blobId": "d5045ced0240acc85af9c4626bb6c635ffa1e13a",
+        "size": 3123
+      },
+      "sha256": "edd81d29d8e2b8f1225afc3602e8be5201903e5c184c65d365534471c82811d0",
+      "verification": "Git blob SHA-1 and local SHA-256"
+    },
+    {
+      "name": "__init__.py",
+      "size": 35,
+      "upstream": {
+        "rfilename": "__init__.py",
+        "blobId": "9ab992a2cbe5f6a55d2ecda4c1efd4d81f168cfb",
+        "size": 35
+      },
+      "sha256": "aa4ed85a01d76e54db092e4e9b472c952130af70f93877dcde2abf2b86cfe774",
+      "verification": "Git blob SHA-1 and local SHA-256"
+    },
+    {
+      "name": "added_tokens.json",
+      "size": 23,
+      "upstream": {
+        "rfilename": "added_tokens.json",
+        "blobId": "8ee2b3623dc526b123cde0aaa401755b82299af2",
+        "size": 23
+      },
+      "sha256": "dc046d04c9b0ada7ae6f1dc89c465801799acdf0c9a6aab8c15a1b2d5ca4e91f",
+      "verification": "Git blob SHA-1 and local SHA-256"
+    },
+    {
+      "name": "config.json",
+      "size": 1062,
+      "upstream": {
+        "rfilename": "config.json",
+        "blobId": "53ae95a8cfa196973ad43b481979a5fabc1ca2a6",
+        "size": 1062
+      },
+      "sha256": "f7ab538357be6b11364e4ad225595fe2a96b64f69506387a04e3cae699bac1d0",
+      "verification": "Git blob SHA-1 and local SHA-256"
+    },
+    {
+      "name": "inference_examples.py",
+      "size": 606,
+      "upstream": {
+        "rfilename": "inference_examples.py",
+        "blobId": "a120be4e01a772c24ba9e623f41bfec86e72eb89",
+        "size": 606
+      },
+      "sha256": "9b7d3decab3bbc425892590c24ea08b01da1dad003f64eceb1b13340381d390c",
+      "verification": "Git blob SHA-1 and local SHA-256"
+    },
+    {
+      "name": "model.safetensors",
+      "size": 737719272,
+      "upstream": {
+        "rfilename": "model.safetensors",
+        "blobId": "28774ae0fb52996911162fe69d1fc80526984cf3",
+        "size": 737719272,
+        "lfs": {
+          "sha256": "f90b9806de93b6286cda517300d4b55e5ce2e5ccbf8339dc59be21ca0dd9a25e",
+          "size": 737719272,
+          "pointerSize": 134
+        }
+      },
+      "sha256": "f90b9806de93b6286cda517300d4b55e5ce2e5ccbf8339dc59be21ca0dd9a25e",
+      "verification": "LFS SHA-256 and size"
+    },
+    {
+      "name": "modeling_piguard.py",
+      "size": 973,
+      "upstream": {
+        "rfilename": "modeling_piguard.py",
+        "blobId": "c5ced5d18b6617903a76425001d25f97565f2822",
+        "size": 973
+      },
+      "sha256": "5be806a223cf20c418171a409726110c02a7377d75f22ee6f80d7c72ac0fa529",
+      "verification": "Git blob SHA-1 and local SHA-256"
+    },
+    {
+      "name": "special_tokens_map.json",
+      "size": 286,
+      "upstream": {
+        "rfilename": "special_tokens_map.json",
+        "blobId": "2c9cb07c8fdeeb5ac3ceafb170592e990b204dcd",
+        "size": 286
+      },
+      "sha256": "9463f61e1b109a8eb4688b829260d7c6b1e6dff04c98ff7269bb89e2b92369b9",
+      "verification": "Git blob SHA-1 and local SHA-256"
+    },
+    {
+      "name": "tokenizer.json",
+      "size": 8656624,
+      "upstream": {
+        "rfilename": "tokenizer.json",
+        "blobId": "12cc2e86bad0e731393847b017b32a7405ebd4f8",
+        "size": 8656624
+      },
+      "sha256": "5124ef2ead1a10a717703bc436de7f353da76d6340e4587719b42b1693707964",
+      "verification": "Git blob SHA-1 and local SHA-256"
+    },
+    {
+      "name": "tokenizer_config.json",
+      "size": 1284,
+      "upstream": {
+        "rfilename": "tokenizer_config.json",
+        "blobId": "13d6406af565bd9e59dd649afd4c2b48bddb6a4c",
+        "size": 1284
+      },
+      "sha256": "557b3d33d3f41b81ad769244e506549e98a1857d41dd58160aacd4d98d710b5a",
+      "verification": "Git blob SHA-1 and local SHA-256"
+    }
+  ],
+  "omitted": "Training/helper files, figures, bytecode, and spm.model are omitted; the complete fast tokenizer is tokenizer.json. Upstream metadata lists spm.model as a 132-byte LFS object, so no unverified replacement was supplied.",
+  "dependencies_log": "dependency-install.log",
+  "smoke_script": "verify_cpu.py"
+}

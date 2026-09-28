@@ -122,7 +122,7 @@ class FullRuntimeTests(unittest.TestCase):
             guard=AgentSafeFull(args,judge,lambda text:[1.,0.])
             runtime=self.runtime_module().FullRuntime(args,guard=guard)
             entry=SimpleNamespace(memory_id="m",experience="bad record",origin_agent=0,baseline_metadata={},status="active")
-            self.assertTrue(runtime.admit(entry,"team",0)[0])
+            self.assertTrue(runtime.admit(entry,"private",0)[0])
             judge.junk=True
             runtime.defend({0:"reply"},0,[[0]])
             self.assertEqual(entry.status,"quarantined")
@@ -138,6 +138,106 @@ class FullRuntimeTests(unittest.TestCase):
             entry.experience="bad record"
             self.assertEqual(runtime.filter_entries([entry],0)[0],[])
             self.assertEqual(entry.status,"quarantined")
+
+    def test_shared_agentsafe_quarantine_is_holder_local_and_persistent(self):
+        import json
+        from evaluate.defense_methods.agentsafe_full import AgentSafeFull
+        from test_agentsafe_full import FakeJudge
+        with tempfile.TemporaryDirectory() as folder:
+            policy=Path(folder)/"policy.json"; criteria=Path(folder)/"criteria.json"
+            policy.write_text(json.dumps({"identities":{"0":"Agent 0","1":"Agent 1"}}))
+            criteria.write_text(json.dumps(["valid task facts"]))
+            args=SimpleNamespace(method="agentsafe_full",baseline_state_path=str(Path(folder)/"state.json"),
+                agentsafe_policy_file=str(policy),agentsafe_criteria_file=str(criteria),agentsafe_threshold=0.5,
+                agentsafe_review_interval=1)
+            judge=FakeJudge(level=1)
+            rt=self.runtime_module().FullRuntime(args,guard=AgentSafeFull(args,judge,lambda t:[1.,0.]))
+            m=SimpleNamespace(memory_id="shared",experience="facts",origin_agent=0,
+                memory_scope="team",baseline_metadata={},status="active")
+            self.assertTrue(rt.admit(m,"team",0)[0])
+            self.assertEqual(rt.filter_entries([m],1)[0],[m])
+            judge.junk_by_holder[1]=True
+            rt.defend({0:"a",1:"b"},0,[[0,1],[1,0]])
+            self.assertEqual(m.status,"active")
+            self.assertEqual(rt.filter_entries([m],1)[0],[])
+            self.assertEqual(rt.filter_entries([m],0)[0],[m])
+            restored=self.runtime_module().FullRuntime(args,guard=AgentSafeFull(args,judge,lambda t:[1.,0.]))
+            fresh=SimpleNamespace(memory_id="shared",experience="facts",origin_agent=0,
+                memory_scope="team",baseline_metadata={},status="active")
+            self.assertEqual(restored.filter_entries([fresh],1)[0],[])
+            self.assertEqual(restored.filter_entries([fresh],0)[0],[fresh])
+            self.assertEqual(fresh.status,"active")
+
+    def test_released_infa_filters_senders_but_keeps_generation(self):
+        rt=self.runtime_module()
+        guard=SimpleNamespace(inactive=set(),blocked_senders={0},takeover_context="donor_system_only")
+        session=rt.FullRuntime(SimpleNamespace(method="infa_guard_full"),guard=guard)
+        session.begin_task("t","task")
+        for aid in (0,1):
+            messages=[{"role":"system","content":f"role {aid}"},{"role":"user","content":f"private tools {aid}"}]
+            session.register_task_context(aid,messages)
+            session.generate(aid,messages,lambda ms:"answer")
+        self.assertEqual(session.peer_context({0:"blocked",1:"allowed"},[[0,1],[1,0]],1),"")
+        self.assertEqual(session.generate(0,[{"role":"user","content":"next"}],lambda ms:"still active"),"still active")
+        session.replace_agent(0,1,"donor response")
+        self.assertEqual(session.contexts[0],[{"role":"system","content":"role 1"},{"role":"assistant","content":"donor response"}])
+        self.assertEqual(session.memory_owner(0),0)
+        self.assertEqual(session.replacements,{})
+
+    def test_released_agentxposed_gets_public_history_and_guides_same_turn_prompt(self):
+        rt=self.runtime_module()
+        class Guard:
+            inactive=set()
+            def prepare_messages(self,aid,messages):
+                return messages
+            def defend(self,outputs,*a,released_memories,regenerate,**kw):
+                self.public=released_memories(0)
+                return {0:regenerate(0,"OFFICIAL GUIDE")},[]
+        guard=Guard()
+        session=rt.FullRuntime(SimpleNamespace(method="agentxposed_full_guide"),guard=guard)
+        session.begin_task("t","question")
+        seen=[]
+        session.generate(0,[{"role":"system","content":"PRIVATE ROLE"},{"role":"user","content":"TASK"}],lambda msgs: seen.append(msgs) or "answer")
+        session.defend({0:"answer"},0,[[0]])
+        self.assertEqual(guard.public,[{"role":"user","content":"TASK"},{"role":"assistant","content":"answer"}])
+        self.assertEqual(len(seen[1]),2)
+        self.assertIn("TASK",seen[1][-1]["content"])
+        self.assertIn("OFFICIAL GUIDE",seen[1][-1]["content"])
+
+    def test_agentsafe_runtime_uses_retained_holder_history_and_removes_junk(self):
+        import json
+        from evaluate.defense_methods.agentsafe_full import AgentSafeFull
+        from test_agentsafe_full import FakeJudge
+        with tempfile.TemporaryDirectory() as folder:
+            p=Path(folder)/"p.json";c=Path(folder)/"c.json"
+            p.write_text(json.dumps({"identities":{"0":"Agent 0","-1":"User"}}))
+            c.write_text(json.dumps(["facts"]))
+            args=SimpleNamespace(method="agentsafe_full",agentsafe_policy_file=str(p),
+                agentsafe_criteria_file=str(c),agentsafe_threshold=.5,agentsafe_review_interval=1)
+            judge=FakeJudge(level=1)
+            session=self.runtime_module().FullRuntime(args,guard=AgentSafeFull(args,judge,lambda t:[1.,0.]))
+            m=SimpleNamespace(memory_id="seed",experience="RETAINED HISTORY",origin_agent=-1,baseline_metadata={},status="active")
+            self.assertTrue(session.admit(m,"private",0)[0])
+            prompts=[]
+            session.generate(0,[{"role":"user","content":"question"}],lambda ms:prompts.append(ms) or "answer")
+            self.assertIn("RETAINED HISTORY",str(prompts[-1]))
+            judge.junk=True
+            session.defend({0:"answer"},0,[[0]])
+            self.assertEqual(m.status,"quarantined")
+            session.generate(0,[{"role":"user","content":"next"}],lambda ms:prompts.append(ms) or "answer")
+            self.assertNotIn("RETAINED HISTORY",str(prompts[-1]))
+
+    def test_conflicting_private_read_id_fails_before_registry_mutation(self):
+        rt=self.runtime_module()
+        session=rt.FullRuntime(SimpleNamespace(method="agentsafe_full"),
+            guard=SimpleNamespace(read=lambda **kw:(True,{})))
+        a=SimpleNamespace(memory_id="same",experience="A",origin_agent=0,memory_scope="agent_private",baseline_metadata={},status="active")
+        b=SimpleNamespace(memory_id="same",experience="B",origin_agent=0,memory_scope="agent_private",baseline_metadata={},status="active")
+        session.filter_entries([a],0)
+        with self.assertRaisesRegex(ValueError,"unique"):
+            session.filter_entries([b],1)
+        self.assertIs(session.entries["same"],a)
+        self.assertEqual(session.holders_by_memory["same"],{0})
 
     def test_full_methods_reject_oracle_filter_settings(self):
         rt=self.runtime_module()
