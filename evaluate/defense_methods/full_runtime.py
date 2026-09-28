@@ -18,6 +18,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 MEMORY_METHODS = ("provenance_acl", "maple_guard_retrieval_only", "amemguard_full", "piguard_retrieval", "piguard_lifecycle")
+STRICT_COMMUNICATION_METHODS = ("challenger", "gsafeguard", "guardian", "inspector")
+MAPLE_GATE_ABLATIONS = ("maple_guard_no_write", "maple_guard_no_retrieval",
+                       "maple_guard_no_promotion", "maple_guard_no_cross_agent")
 FULL_METHODS = ("agentsafe_full", "infa_guard_full",
                 "agentxposed_full_guide", "agentxposed_full_kick")
 _ACTIVE = contextvars.ContextVar("maple_full_baseline", default=None)
@@ -80,7 +83,8 @@ def experiment_identity(args, method=None):
              "peer_communication","strict_comparison","chat_base_url","chat_model","embed_base_url",
              "embed_model","full_judge_base_url","full_judge_model","top_k_memory","min_retrieval_score"}
     values = {k:v for k,v in public_config(args).items()
-              if k in names or k.startswith(("baseline_","amemguard_","piguard_","agentsafe_","infa_","agentxposed_"))}
+              if k in names or k.startswith(("baseline_","amemguard_","piguard_","agentsafe_","infa_","agentxposed_",
+                                             "official_defense_","safeguard_"))}
     values["method"] = method or args.method
     return hashlib.sha256(json.dumps(values, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -116,9 +120,23 @@ def baseline_run_provenance(args):
         provenance = {"source_commit":"cc253ad48532fa6614a27557587086cfb87968ed",
                       "profile":"paper_components_maple_adaptation",
                       "policy_fingerprint":getattr(guard,"_config_fingerprint",None)}
+    judge_model = getattr(args,"full_judge_model","") or getattr(args,"chat_model","")
+    if runtime.method in STRICT_COMMUNICATION_METHODS:
+        from .llm_client import safeguard_config
+        judge_model = safeguard_config(args)[1] if runtime.method in {"challenger", "inspector"} else None
+        provenance = {
+            "profile":"existing_communication_adapter_with_matched_memory",
+            "communication_state":"caller_owned",
+            "failure_policy":"raise_in_strict_comparison",
+            "implementation":"evaluate.defense_methods.adapter",
+            "official_reproduction_claim":False,
+            "gnn_checkpoint":getattr(args,"official_defense_gnn_checkpoint",""),
+            "gnn_embedding_model":getattr(args,"official_defense_embedding_model",""),
+            "guardian_code_dir":getattr(args,"official_defense_guardian_code_dir",""),
+        }
     return {"method":runtime.method, "experiment_identity":getattr(runtime,"experiment_identity",None),
             "runtime":type(runtime).__name__, "component":type(guard).__name__ if guard is not None else None,
-            "judge_model":getattr(args,"full_judge_model","") or getattr(args,"chat_model",""),
+            "judge_model":judge_model,
             "embedding_model":getattr(args,"embed_model",""),
             "state_path":getattr(runtime,"state_path",""),"provenance":provenance,
             "provider_calls":{name:getattr(getattr(guard,name,None),"counters",None) for name in ("judge","embed")},
@@ -516,7 +534,8 @@ def current_runtime(method):
 def runtime_scope(args, method=None, factory=None):
     method = method or getattr(args, "method", "")
     strict = bool(getattr(args, "strict_comparison", False))
-    if strict and method not in (*FULL_METHODS, *MEMORY_METHODS, "maple_guard", "no_defense_memrl"):
+    if strict and method not in (*FULL_METHODS, *MEMORY_METHODS, *STRICT_COMMUNICATION_METHODS,
+                                 *MAPLE_GATE_ABLATIONS, "maple_guard", "no_defense_memrl"):
         raise ValueError("Unsupported strict comparison method: " + str(method))
     if method not in (*FULL_METHODS, *MEMORY_METHODS) and not strict:
         yield None

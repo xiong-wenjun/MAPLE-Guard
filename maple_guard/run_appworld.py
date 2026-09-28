@@ -55,6 +55,7 @@ def _cfg(path: str) -> Dict[str, Any]:
 def _parse_appworld_known(argv: Sequence[str]) -> tuple[argparse.Namespace, List[str], Dict[str, Any]]:
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--config", default=os.environ.get("CONFIG_YAML", DEFAULT_CONFIG))
+    pre.add_argument("--benchmark-bundle", default="", help="Frozen user bundle; evaluates action selection, not native AppWorld execution.")
     pre.add_argument("--appworld-root", default="")
     pre.add_argument("--appworld-split", default="")
     pre.add_argument("--index-out-dir", default="")
@@ -77,6 +78,7 @@ def parse_args() -> argparse.Namespace:
         args = stream.parse_args()
     finally:
         sys.argv = original_argv
+    args.benchmark_bundle = appworld_args.benchmark_bundle
     args.appworld_root = appworld_args.appworld_root
     args.appworld_split = appworld_args.appworld_split
     args.index_out_dir = appworld_args.index_out_dir
@@ -98,6 +100,15 @@ def manifest_for_split(args: argparse.Namespace) -> str:
 
 
 def ensure_appworld_index(args: argparse.Namespace) -> Dict[str, Any]:
+    if getattr(args, "benchmark_bundle", ""):
+        if args.dataset or args.rebuild_index:
+            raise ValueError("--benchmark-bundle cannot be combined with --dataset or --rebuild-index")
+        from maple_guard.benchmarks.benchmark_bundle import load_bundle, appworld_cases
+        bundle, manifest = load_bundle(args.benchmark_bundle, "appworld")
+        args._bundle_cases = appworld_cases(bundle, args.benchmark_bundle)
+        manifest.update(evaluation_protocol="appworld_action_selection_proxy", native_execution=False,
+                        metadata_policy="provided_specs_only", index_file=None)
+        return manifest
     dataset_path = Path(args.dataset or dataset_for_split(args))
     manifest_path = Path(manifest_for_split(args))
     if args.rebuild_index or not dataset_path.exists() or not manifest_path.exists():
@@ -143,6 +154,10 @@ def task_from_case(case: AppWorldCase) -> ep.TaskExample:
 
 
 def select_cases(args: argparse.Namespace) -> List[AppWorldCase]:
+    if getattr(args, "benchmark_bundle", ""):
+        if not hasattr(args, "_bundle_cases"):
+            ensure_appworld_index(args)
+        return sample_cases(args._bundle_cases, int(args.tasks), int(args.seed))
     path = args.dataset or dataset_for_split(args)
     cases = load_cases(path)
     return sample_cases(cases, int(args.tasks), int(args.seed))
@@ -170,6 +185,8 @@ def add_appworld_summary(summary: Dict[str, Any], records: Sequence[stream.Strea
         return _rate(sum(record.action_security_failure for record in rows), len(rows))
 
     summary["appworld"] = {
+        "evaluation_protocol": "appworld_action_selection_proxy",
+        "native_execution": False,
         "case_count": len(action_records),
         "split_counts": {split: len(rows) for split, rows in sorted(by_split.items())},
         "utility_sr": utility(action_records),
@@ -185,8 +202,11 @@ def main() -> None:
     args = stream.resolve_args(parse_args())
     random.seed(args.seed)
     manifest = ensure_appworld_index(args)
-    args.dataset = args.dataset or dataset_for_split(args)
+    args.dataset = args.benchmark_bundle or args.dataset or dataset_for_split(args)
     cases = select_cases(args)
+    manifest["selected_native_task_ids"] = [case.task_id for case in cases]
+    manifest["selection_seed"] = args.seed
+    manifest["sampling"] = "fixed_order" if len(cases) == manifest.get("total_cases") else "seeded_subset_in_source_order"
     task_stream = [task_from_case(case) for case in cases]
     if not task_stream:
         raise ValueError("Empty AppWorld task stream")
@@ -195,6 +215,10 @@ def main() -> None:
     out_dir = os.path.dirname(args.out)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
+    resolved = {key: ("<redacted>" if value and ("api_key" in key.lower() or key.lower() in {"password", "token"}) else value)
+                for key, value in vars(args).items() if not key.startswith("_")}
+    with open(str(Path(args.out).parent / "resolved-args.json"), "w", encoding="utf-8") as config_file:
+        json.dump(resolved, config_file, ensure_ascii=False, indent=2)
     if ep.create_memory_backend_bundle is None:
         raise RuntimeError(f"Failed to import MemRL backend: {ep.MEMORY_BACKEND_IMPORT_ERROR}")
     memory_backend = ep.create_memory_backend_bundle(args, ep.MemoryEntry)

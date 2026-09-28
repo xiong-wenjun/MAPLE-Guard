@@ -61,7 +61,7 @@ class OpenAICompatibleLLM(BaseLLM):
     def __init__(self, base_url: str, model: str, api_key: str = "EMPTY", timeout: int = 120) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self.api_key = api_key
+        self.api_key = (api_key if api_key and api_key != "EMPTY" else os.getenv("CHAT_API_KEY") or os.getenv("OPENAI_API_KEY") or "EMPTY")
         self.timeout = timeout
         self.default_max_tokens = int(os.environ.get("CHAT_MAX_TOKENS", "128"))
 
@@ -76,6 +76,8 @@ class OpenAICompatibleLLM(BaseLLM):
         }
         if max_tokens > 0:
             payload["max_tokens"] = max_tokens
+        if os.getenv("CHAT_DISABLE_THINKING") == "1":
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         stops = chat_stop_sequences()
         if stops:
             payload["stop"] = stops
@@ -116,7 +118,7 @@ class OpenAICompatibleEmbedder(BaseEmbedder):
             fallback_dim = 4096
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self.api_key = api_key
+        self.api_key = (api_key if api_key and api_key != "EMPTY" else os.getenv("EMBED_API_KEY") or "EMPTY")
         self.fallback_dim = fallback_dim
         self.embedding_dim = fallback_dim
         self.timeout = timeout
@@ -403,7 +405,8 @@ class MemRLMemoryBackend:
         cfg_dir = os.path.join(store_dir, "configs", self.user_id)
         os.makedirs(cfg_dir, exist_ok=True)
         db_path = os.path.join(cfg_dir, "users.db")
-        api_key = getattr(self.args, "api_key", "EMPTY") or "EMPTY"
+        api_key = getattr(self.args, "api_key", "") or os.getenv("CHAT_API_KEY") or os.getenv("OPENAI_API_KEY") or "EMPTY"
+        embed_api_key = getattr(self.args, "embed_api_key", "") or os.getenv("EMBED_API_KEY") or api_key
         mos_config = {
             "chat_model": {
                 "backend": "openai",
@@ -429,7 +432,7 @@ class MemRLMemoryBackend:
                         "config": {
                             "provider": "openai",
                             "model_name_or_path": self.args.embed_model,
-                            "api_key": api_key,
+                            "api_key": embed_api_key,
                             "base_url": self.args.embed_base_url,
                         },
                     },
@@ -440,7 +443,9 @@ class MemRLMemoryBackend:
             "top_k": int(getattr(self.args, "top_k_memory", 3)),
         }
         self._mos_config_path = os.path.join(cfg_dir, "mos_config.json")
-        with open(self._mos_config_path, "w", encoding="utf-8") as f:
+        fd = os.open(self._mos_config_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(mos_config, f, ensure_ascii=False, indent=2)
 
         strategy = StrategyConfiguration.from_strings(
@@ -454,7 +459,7 @@ class MemRLMemoryBackend:
             weight_q=float(getattr(self.args, "memrl_weight_q", 0.5)),
         )
         llm = OpenAICompatibleLLM(self.args.chat_base_url, self.args.chat_model, api_key=api_key)
-        embedder = OpenAICompatibleEmbedder(self.args.embed_base_url, self.args.embed_model, api_key=api_key, strict=_strict_backend(self.args))
+        embedder = OpenAICompatibleEmbedder(self.args.embed_base_url, self.args.embed_model, api_key=embed_api_key, strict=_strict_backend(self.args))
         self._service = MemoryService(
             mos_config_path=self._mos_config_path,
             llm_provider=llm,

@@ -32,8 +32,15 @@ def _threshold(ctx: DefenseContext) -> float:
     if raw is None:
         raw = os.environ.get("OFFICIAL_DEFENSE_GNN_THRESHOLD", DEFAULT_GNN_THRESHOLD)
     try:
-        return float(raw)
+        value = float(raw)
+        if getattr(ctx.args, "strict_comparison", False) and (
+            not np.isfinite(value) or not 0.0 <= value <= 1.0
+        ):
+            raise ValueError("GNN threshold must be finite and within [0, 1]")
+        return value
     except (TypeError, ValueError):
+        if getattr(ctx.args, "strict_comparison", False):
+            raise ValueError("GNN threshold must be finite and within [0, 1]")
         return DEFAULT_GNN_THRESHOLD
 
 
@@ -152,6 +159,8 @@ def _build_graph_tensors(runtime: Dict[str, Any], ctx: DefenseContext, history: 
 def apply_gnn_official(outputs: Dict[int, Any], state: OfficialDefenseState, ctx: DefenseContext, guard: str):
     checkpoint = _checkpoint_path(ctx)
     if not checkpoint:
+        if getattr(ctx.args, "strict_comparison", False):
+            raise RuntimeError(f"{guard}: checkpoint is required for strict comparison")
         filtered, decisions = _allow_all(outputs, f"{guard}_checkpoint_missing_no_detection", {"method_scope": "communication_gnn_detector"})
         return filtered, state, decisions
 
@@ -164,6 +173,8 @@ def apply_gnn_official(outputs: Dict[int, Any], state: OfficialDefenseState, ctx
         "memory_firewall": False,
     }
     if runtime is None:
+        if getattr(ctx.args, "strict_comparison", False):
+            raise RuntimeError(f"{guard}: detector runtime unavailable: {error}")
         details["error"] = str(error or "unknown_runtime_error")[:500]
         filtered, decisions = _allow_all(outputs, f"{guard}_gnn_runtime_unavailable", details)
         return filtered, state, decisions
@@ -178,7 +189,13 @@ def apply_gnn_official(outputs: Dict[int, Any], state: OfficialDefenseState, ctx
         with torch.no_grad():
             logits = runtime["model"](x, edge_index, edge_attr).view(-1)
             probs = torch.sigmoid(logits).detach().cpu().numpy()
+        if getattr(ctx.args, "strict_comparison", False):
+            required = int(getattr(ctx.args, "agents", 0) or len(outputs))
+            if len(probs) != required or not np.isfinite(probs).all():
+                raise ValueError("detector must return one finite probability per agent")
     except Exception as exc:  # pragma: no cover - depends on optional baseline deps
+        if getattr(ctx.args, "strict_comparison", False):
+            raise RuntimeError(f"{guard}: detector inference failed; strict comparison aborted") from exc
         details["error"] = str(exc)[:500]
         filtered, decisions = _allow_all(outputs, f"{guard}_gnn_inference_failed", details)
         return filtered, state, decisions

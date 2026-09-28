@@ -611,7 +611,8 @@ def remote_embedding(text: str, base_url: str, model: str, timeout: int = 60) ->
     if requests is None:
         return None
     try:
-        resp = requests.post(f"{base_url.rstrip('/')}/embeddings", json={"model": model, "input": text}, timeout=timeout)
+        from maple_guard.providers.service_auth import embedding_headers
+        resp = requests.post(f"{base_url.rstrip('/')}/embeddings", headers=embedding_headers(base_url), json={"model": model, "input": text}, timeout=timeout)
         resp.raise_for_status()
         return resp.json()["data"][0]["embedding"]
     except Exception:
@@ -1525,6 +1526,10 @@ def apply_official_communication_defense_to_outputs(
     method = normalize_method(method)
     runtime = current_runtime(method)
     if runtime is not None:
+        if getattr(runtime, "uses_legacy_communication_adapter", False):
+            updated, state, raw = runtime.defend_communication(
+                current_outputs, official_defense_state, round_idx, adj_matrix)
+            return updated, state, official_communication_decisions_to_trace(raw, method, task_id, round_idx)
         updated, raw = runtime.defend(current_outputs, round_idx, adj_matrix)
         return updated, runtime, official_communication_decisions_to_trace(raw, method, task_id, round_idx)
     if not method_has_official_communication_defense(method):
@@ -2093,6 +2098,7 @@ def call_chat(
 ) -> str:
     if requests is None:
         raise RuntimeError("requests is not installed")
+    from maple_guard.providers.service_auth import chat_headers
     token_limit = int(max_tokens or os.environ.get("CHAT_MAX_TOKENS", "128") or 0)
     payload = {"model": model, "messages": messages, "temperature": temperature}
     if token_limit > 0:
@@ -2107,6 +2113,7 @@ def call_chat(
         try:
             resp = requests.post(
                 f"{base_url.rstrip('/')}/chat/completions",
+                headers=chat_headers(base_url),
                 json=payload,
                 timeout=timeout,
             )
@@ -2119,6 +2126,10 @@ def call_chat(
             break
         except Exception as exc:
             last_error = exc
+            if getattr(exc, "fatal_for_benchmark", False):
+                raise
+            if isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code in (400, 401, 403, 404, 413, 422):
+                raise
             if attempt == 7:
                 raise
             time.sleep(min(30, 2 ** attempt))

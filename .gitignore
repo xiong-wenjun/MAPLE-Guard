@@ -34,3 +34,6 @@ PI/result_maple_guard/
 # Temporary files
 *.tmp
 *.swp
+
+# Per-process MemOS state belongs outside the source tree.
+.memos/

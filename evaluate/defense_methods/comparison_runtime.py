@@ -43,6 +43,8 @@ def model_clients(args):
 class ComparisonRuntime:
     def __init__(self,args,guard=None):
         self.args,self.method=args,args.method
+        from .full_runtime import STRICT_COMMUNICATION_METHODS
+        self.uses_legacy_communication_adapter = self.method in STRICT_COMMUNICATION_METHODS
         from .full_runtime import experiment_identity
         self.experiment_identity=experiment_identity(args)
         self._scope_identity=self.experiment_identity
@@ -318,6 +320,24 @@ class ComparisonRuntime:
         output=generate(messages)
         if not isinstance(output,str):raise RuntimeError("Agent model returned non-text output")
         return output
+
+    def defend_communication(self, outputs, state, round_idx, adjacency):
+        """Keep the existing adapter and caller-owned state lifetime.
+
+        Core/OpenQA callers reset communication state per task; the transfer
+        runner carries it across records. The matched memory sidecar must not
+        override either protocol or substitute a memory defense for the guard.
+        """
+        if not self.uses_legacy_communication_adapter:
+            raise ValueError("Method has no legacy communication adapter")
+        from .adapter import apply_official_communication_defense
+        updated, state, decisions = apply_official_communication_defense(
+            self.method, dict(outputs), state, task_id=self.task_id,
+            question=self.question, round_idx=round_idx, adj_matrix=adjacency,
+            args=self.args)
+        pending, self.pending = self.pending, []
+        self.save()
+        return updated, state, pending + decisions
 
     def defend(self,outputs,round_idx,adjacency):
         pending,self.pending=self.pending,[]

@@ -317,6 +317,7 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
         elif getattr(args, "defense_enabled", None) is False:
             args.method = ep.METHOD_NO_DEFENSE_MEMRL
     args.method = ep.normalize_method(args.method)
+    os.environ["CHAT_DISABLE_THINKING"] = "1" if getattr(args, "disable_chat_thinking", False) else "0"
     apply_attack_surface(args)
     args.attack_stealth_mode = ep.normalize_attack_stealth_mode(getattr(args, "attack_stealth_mode", ep.STEALTH_METADATA_CLEAN))
     if int(getattr(args, "chat_max_tokens", 0) or 0) > 0:
