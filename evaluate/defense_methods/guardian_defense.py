@@ -71,7 +71,9 @@ def _guardian_bert_parent(ctx=None) -> Optional[Path]:
     configured = (getattr(ctx.args, "official_defense_guardian_bert_dir", "") if ctx else "") or os.environ.get("OFFICIAL_DEFENSE_GUARDIAN_BERT_DIR", "")
     if configured:
         explicit = Path(configured).expanduser()
-        if explicit.name != "bert-base-uncased" or not all((explicit/name).is_file() for name in ("config.json", "vocab.txt", "model.safetensors")):
+        if (explicit.name != "bert-base-uncased"
+                or not all((explicit/name).is_file() for name in ("config.json", "vocab.txt"))
+                or not any((explicit/name).is_file() for name in ("model.safetensors", "pytorch_model.bin"))):
             raise ValueError("Explicit GUARDIAN BERT directory must contain config, vocabulary and weights and be named bert-base-uncased")
     candidates = []
     if configured:

@@ -63,7 +63,7 @@ python tools/official_reproduction.py agentsafe-relations \
 
 新服务器可运行 `official_reproduction.py prepare-infa-data` 重建同样审计；需要 pandas 和 pyarrow。本服务器 pyarrow 安装在独立 `/mnt/public/data/wj/baseline-training-runtime`，使用 PYTHONPATH，不修改已有实验依赖。
 
-执行器 `tools/run_infa_release_stage.py` 的 stage 顺序是 prepare → generate（grid-index 0..19）→ merge → embed → train。命令清单由 `official_reproduction.py infa-recipe` 生成，原模型和 Qwen 替换版分开保存。原生 evaluate/utils/train 模块在专用进程内重新导入，防止误调用 MAPLE 同名包。执行器拒绝修改后的 recipe、源码、模型资产、测试文件或训练输入，API 密钥仅注入环境。API 审计不修改官方请求参数；截断、空回复或 API 错误会阻止训练。
+执行器 `tools/run_infa_release_stage.py` 的 stage 顺序是 prepare → generate（grid-index 0..19）→ merge → embed → train。命令清单由 `official_reproduction.py infa-recipe` 生成，原模型和 Qwen 替换版分开保存。原生 evaluate/utils/train 模块在专用进程内重新导入，防止误调用 MAPLE 同名包。执行器拒绝修改后的 recipe、源码、模型资产、测试文件或训练输入，API 密钥仅注入环境。released 配置的 API 审计不修改请求参数；截断、空回复或 API 错误会阻止训练。
 
 ```bash
 # 下列路径均是服务器路径。prepare 只允许新工作目录。
@@ -76,6 +76,8 @@ python tools/official_reproduction.py infa-recipe \
 ```
 
 `--protocol-check` 只生成两条流程检查对话，写入独立 protocol-check 目录；无法作为正式训练阶段输入。合并前要求 20 个文件、每文件 40 条、总计 800 条，每条必须包含 8 个节点的 4 轮非空回复和真实逐轮 infection 标签。拒绝用最后一轮感染结果补齐缺失标签。合并前记录文件顺序，拒绝重复合并导致 dataset.json 被自身纳入。
+
+真实流程检查发现：Qwen 使用官方 1024 token 上限、默认思考时，首批 8 次请求有 5 次截断，其中 4 次正文为空。因此保留原参数失败记录，并新增显式 qwen_no_thinking 生成配置，仅增加 enable_thinking=false 请求参数，仍保留 1024 token、官方 prompts 与训练参数。它是 Qwen 模型替换协议，不是原 GPT-4o-mini 配置；不能将其失败或不完整记录混入正式训练集。
 
 每个已完成阶段记录实际依赖版本。当前验证环境与上游 requirements 的所有版本并非完全一致，因此不声称复原原作者的二进制环境；原代码与适配入口的差分测试在同一记录环境执行。
 

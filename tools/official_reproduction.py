@@ -30,6 +30,7 @@ def main(argv=None):
     recipe.add_argument("--job-dir",required=True)
     recipe.add_argument("--dataset-dir",required=True)
     recipe.add_argument("--model",default="gpt-4o-mini")
+    recipe.add_argument("--generation-profile",choices=("released","qwen_no_thinking"),default="released")
     recipe.add_argument("--seed",type=int,required=True)
     recipe.add_argument("--output",required=True)
     data = sub.add_parser("prepare-infa-data")
@@ -60,7 +61,7 @@ def main(argv=None):
         write_new(destination/"provenance.json",report)
     elif args.action == "infa-recipe":
         provenance = repro.verify_source("infa",args.source)
-        report = repro.infa_recipe(args.source,args.job_dir,args.dataset_dir,args.model,args.seed)
+        report = repro.infa_recipe(args.source,args.job_dir,args.dataset_dir,args.model,args.seed,args.generation_profile)
         report["provenance"] = provenance
         write_new(args.output,report)
     elif args.action == "prepare-infa-data":
