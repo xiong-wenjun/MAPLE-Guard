@@ -292,3 +292,7 @@ MAPLE-Guard builds on research in multi-agent safety, memory poisoning,
 long-term memory agents, G-Safeguard, and INFA-Guard. Baseline adapters should
 be checked against their original implementations when reproducing
 paper-scale results.
+
+## Full-component baseline variants
+
+Opt-in AgentSafe, INFA-Guard, and AgentXposed variants now connect memory protection, live inquiry/remediation, and persistent agent removal/replacement to the runners. See the [implementation and reproduction guide](docs/baselines/README.md) for method names, required configuration, source fidelity, checkpoint compatibility, and testing. Existing baseline names preserve their earlier behavior; new implementations require fresh evaluation before reporting new results.

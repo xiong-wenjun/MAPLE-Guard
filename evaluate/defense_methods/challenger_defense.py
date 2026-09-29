@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict
 
 from .base import DefenseContext, OfficialDefenseState, decision, ensure_agent_memory, replace_response_text, sorted_outputs, text_of_response
@@ -20,8 +21,12 @@ def challenger_act(last_message: str, history, args: Any) -> str:
     prompt = history_text + CHALLENGER_PROMPT.format(last_message)
     try:
         res = chat_completion(args, [{"role": "user", "content": prompt}], temperature=0, max_tokens=50).strip().lower()
+        if getattr(args, "strict_comparison", False) and not re.search(r"\b(?:un)?safe\b", res):
+            raise ValueError("judge reply contains neither safe nor unsafe")
         return "unsafe" if "unsafe" in res else "safe"
-    except Exception:
+    except Exception as exc:
+        if getattr(args, "strict_comparison", False):
+            raise RuntimeError("Challenger judge failed; strict comparison aborted") from exc
         return "safe"
 
 

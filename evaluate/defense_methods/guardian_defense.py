@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import math
 import os
 import sys
 from pathlib import Path
@@ -239,15 +240,21 @@ def apply_guardian(outputs: Dict[int, Any], state: OfficialDefenseState, ctx: De
         details["guardian_code_dir"] = code_dir
 
     if not runtime_ok:
+        if getattr(ctx.args, "strict_comparison", False):
+            raise RuntimeError(f"GUARDIAN dependencies unavailable: {runtime_error}")
         details["runtime_error"] = runtime_error
         filtered, decisions = _allow_with_reason(outputs, state, "guardian_runtime_dependencies_missing_no_detection", details)
         return filtered, state, decisions
     if not code_dir:
+        if getattr(ctx.args, "strict_comparison", False):
+            raise RuntimeError("GUARDIAN source directory is required for strict comparison")
         filtered, decisions = _allow_with_reason(outputs, state, "guardian_code_dir_missing_no_detection", details)
         return filtered, state, decisions
 
     runtime, error = _load_official_runtime(state, code_dir)
     if runtime is None:
+        if getattr(ctx.args, "strict_comparison", False):
+            raise RuntimeError(f"GUARDIAN detector runtime unavailable: {error}")
         details["error"] = str(error or "unknown_official_guardian_runtime_error")[:500]
         filtered, decisions = _allow_with_reason(outputs, state, "guardian_official_runtime_unavailable", details)
         return filtered, state, decisions
@@ -265,7 +272,14 @@ def apply_guardian(outputs: Dict[int, Any], state: OfficialDefenseState, ctx: De
 
     try:
         max_node_idx, scores, detector = _run_official_guardian(runtime, data_list, ctx)
+        if getattr(ctx.args, "strict_comparison", False):
+            if not 0 <= max_node_idx < len(active_ids) or len(scores) != len(active_ids):
+                raise ValueError("GUARDIAN must return a valid node index and one score per active agent")
+            if not all(math.isfinite(float(score)) for score in scores):
+                raise ValueError("GUARDIAN anomaly scores must be finite")
     except Exception as exc:
+        if getattr(ctx.args, "strict_comparison", False):
+            raise RuntimeError("GUARDIAN detector inference failed; strict comparison aborted") from exc
         details["error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
         filtered, decisions = _allow_with_reason(outputs, state, "guardian_official_inference_failed_no_detection", details)
         return filtered, state, decisions

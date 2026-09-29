@@ -228,6 +228,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-file", default=None)
     p.add_argument("--log-every", type=int, default=int(cfg_get(cfg, "experiment.log_every", 5)))
     p.add_argument("--dry-run", action="store_true")
+    ep.add_full_baseline_args(p, cfg)
     args = p.parse_args()
     args.method_explicit = any(arg == "--method" or arg.startswith("--method=") for arg in sys.argv[1:])
     return args
@@ -789,12 +790,22 @@ def commit_trusted_seed_memory(
     private_memories: Dict[int, List[ep.MemoryEntry]],
     shared_memories: List[ep.MemoryEntry],
     memory_backend: Optional[Any],
+    method: str = "",
 ) -> Tuple[bool, List[ep.DefenseDecision]]:
     """Install benchmark-provided user history as read-only seed memory.
 
     LongMemEval haystack sessions are the initial user-history store for the
     benchmark, not agent-generated memories attempting team promotion.
     """
+    admission = []
+    runtime = ep.current_runtime(method)
+    if runtime is not None:
+        if hasattr(runtime, "observe_ingress"):
+            runtime.observe_ingress(entry, "user_history", requested_scope, target_agent_id, [])
+        allowed, raw = runtime.admit(entry, requested_scope, target_agent_id)
+        admission = ep.official_communication_decisions_to_trace(raw, method, entry.origin_task, entry.origin_round)
+        if not allowed:
+            return False, admission
     entry.status = ep.STATUS_ACTIVE
     decision = trusted_seed_decision(entry, requested_scope, target_agent_id)
     if requested_scope == "team":
@@ -809,7 +820,7 @@ def commit_trusted_seed_memory(
             memory_backend.add_private(target_agent_id, entry)
         else:
             private_memories.setdefault(target_agent_id, []).append(entry)
-    return True, [decision]
+    return True, admission + [decision]
 
 
 def preload_haystack_memories(
@@ -893,7 +904,7 @@ def preload_haystack_memories(
                     item.memory_id = f"{entry.memory_id}_shared"
                     item.memory_scope = "team"
                     item.allowed_agents = list(range(int(args.agents)))
-                    written, ds = commit_trusted_seed_memory(item, "team", 0, private_memories, shared_memories, memory_backend)
+                    written, ds = commit_trusted_seed_memory(item, "team", 0, private_memories, shared_memories, memory_backend, method=args.method)
                 else:
                     written = False
                     ds = []
@@ -902,7 +913,7 @@ def preload_haystack_memories(
                         item.memory_id = f"{entry.memory_id}_private_a{agent_id}"
                         item.memory_scope = "agent_private"
                         item.allowed_agents = [agent_id]
-                        ok, one_ds = commit_trusted_seed_memory(item, "private", agent_id, private_memories, shared_memories, memory_backend)
+                        ok, one_ds = commit_trusted_seed_memory(item, "private", agent_id, private_memories, shared_memories, memory_backend, method=args.method)
                         written = written or ok
                         ds.extend(one_ds)
                 decisions.extend(ds)
@@ -1216,6 +1227,9 @@ def parse_json_answer(raw: str) -> Tuple[str, Dict[str, Any]]:
 
 
 def memory_parent_value(memory: ep.MemoryEntry, prefix: str) -> str:
+    metadata = getattr(memory, "baseline_metadata", {})
+    if "operational" in metadata:
+        return str(metadata.get("history_display", {}).get(prefix, ""))
     needle = f"{prefix}="
     for parent in getattr(memory, "parents", []) or []:
         raw = str(parent)
@@ -1289,7 +1303,8 @@ def adjudicate_final_answer(
     args: argparse.Namespace,
     prompt_bundle: Dict[str, Any],
 ) -> Tuple[str, Dict[str, Any]]:
-    consensus = consensus_answer(final_outputs, set(args.attacker_ids))
+    attacker_set = set() if args.method in ep.FULL_METHODS or ep.strict_runtime_active() else set(args.attacker_ids)
+    consensus = consensus_answer(final_outputs, attacker_set)
     decision: Dict[str, Any] = {
         "stage": "trusted_evidence_adjudicator",
         "enabled": bool(getattr(args, "final_adjudicator", True)),
@@ -1302,7 +1317,6 @@ def adjudicate_final_answer(
     if not evidence:
         decision["reason"] = "no_trusted_task_scoped_evidence"
         return consensus, decision
-    attacker_set = set(args.attacker_ids)
     candidates = []
     for agent_id, output in sorted(final_outputs.items(), key=lambda kv: int(kv[0])):
         if int(agent_id) in attacker_set:
@@ -1410,6 +1424,7 @@ def filter_task_scoped_memories(
     return rerank_trusted_haystack_candidates(task, out, args)[:limit]
 
 
+@ep.scoped_baseline
 def run_openqa_task(
     task: ep.TaskExample,
     args: argparse.Namespace,
@@ -1431,6 +1446,11 @@ def run_openqa_task(
     all_defense: List[ep.DefenseDecision] = []
     poison_target = task.wrong_answer or ""
     official_defense_state = None
+    runtime = ep.current_runtime(args.method)
+    if runtime is not None:
+        runtime.begin_task(task.task_id, task.question)
+        if hasattr(runtime, "observe_task_inputs"):
+            runtime.observe_task_inputs(task.raw)
 
     for r in range(int(args.rounds)):
         if r > 0 and bool(args.enable_round_memory_propagation) and not bool(args.disable_private_memory):
@@ -1467,12 +1487,18 @@ def run_openqa_task(
                     args.min_retrieval_score,
                     memory_backend,
                     bool(args.disable_private_memory),
+                    candidate_filter=lambda memories: [m for m in memories if memory_belongs_to_task(task, m)],
                 )
                 selected = filter_task_scoped_memories(task, selected, int(args.top_k_memory), args)
                 selected_by_agent[agent_id] = selected
                 all_retrieval.extend(rds)
                 all_defense.extend(dds)
 
+        if runtime is not None:
+            selected_by_agent = runtime.select_memories(selected_by_agent)
+            for agent_id in range(int(args.agents)):
+                selected_by_agent[agent_id], raw = runtime.filter_entries(selected_by_agent[agent_id], agent_id)
+                all_defense.extend(ep.official_communication_decisions_to_trace(raw, args.method, task.task_id, r))
         round_selected_memory_ids.append({
             str(agent_id): [m.memory_id for m in selected_by_agent.get(agent_id, [])]
             for agent_id in range(int(args.agents))
@@ -1483,17 +1509,28 @@ def run_openqa_task(
             memory_context = ep.render_memory_context(selected_by_agent.get(agent_id, []), args.method)
             system = agent_system_prompt(args, task, agent_id, poison_target, prompt_bundle)
             user = user_prompt(args, task, memory_context, prompt_bundle)
+            if runtime is not None:
+                runtime.register_task_context(agent_id, [{"role":"system", "content":system},
+                    {"role":"user", "content":user_prompt(args, task, "", prompt_bundle)}])
+                if r > 0:
+                    user += runtime.peer_context(outputs_by_round[-1], adj, agent_id)
+            elif r > 0 and getattr(args, "peer_communication", False):
+                user += ep.peer_context(outputs_by_round[-1], adj, agent_id)
             try:
-                out = ep.call_chat(
-                    args.chat_base_url,
-                    args.chat_model,
-                    [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                    temperature=0.0,
-                    timeout=120,
-                    max_tokens=int(args.chat_max_tokens),
-                    chat_template_kwargs={"enable_thinking": False} if bool(args.disable_chat_thinking) else None,
-                )
+                messages = [{"role":"system", "content":system}, {"role":"user", "content":user}]
+                def generate(messages):
+                    return ep.call_chat(
+                        args.chat_base_url, args.chat_model, messages, temperature=0.0,
+                        timeout=120, max_tokens=int(args.chat_max_tokens),
+                        chat_template_kwargs={"enable_thinking": False} if bool(args.disable_chat_thinking) else None,
+                    )
+                out = runtime.generate(agent_id, messages, generate) if runtime is not None else generate(messages)
+                if out is None:
+                    selected_by_agent[agent_id] = []
+                    continue
             except Exception as exc:
+                if runtime is not None:
+                    raise
                 out = f"Reason: model call failed: {type(exc).__name__}\nFinal answer: "
             current_outputs[agent_id] = out
         current_outputs, official_defense_state, official_dds = ep.apply_official_communication_defense_to_outputs(
@@ -1507,11 +1544,16 @@ def run_openqa_task(
             args=args,
         )
         all_defense.extend(official_dds)
+        if runtime is not None:
+            selected_by_agent = runtime.select_memories(selected_by_agent)
         outputs_by_round.append(current_outputs)
         previous_selected_by_agent = {agent_id: list(memories) for agent_id, memories in selected_by_agent.items()}
 
     final_outputs = outputs_by_round[-1] if outputs_by_round else {}
-    final_answer, adjudicator_decision = adjudicate_final_answer(task, final_outputs, selected_by_agent, args, prompt_bundle)
+    if runtime is not None and not final_outputs:
+        final_answer, adjudicator_decision = "", {"reason":"no_surviving_agents"}
+    else:
+        final_answer, adjudicator_decision = adjudicate_final_answer(task, final_outputs, selected_by_agent, args, prompt_bundle)
     is_correct, final_judge = judge_correctness(task, final_answer, args, prompt_bundle, answer_cache)
     final_judge = dict(final_judge)
     final_judge["final_adjudicator"] = adjudicator_decision
@@ -1521,9 +1563,12 @@ def run_openqa_task(
             if is_trusted_user_history(memory):
                 continue
             memory.update_outcome(is_correct)
-            ep.derive_provenance_scores(memory)
+            if runtime is None or not hasattr(runtime, "record_feedback"):
+                ep.derive_provenance_scores(memory)
             if memory_backend is not None:
                 memory_backend.update_value(memory, is_correct)
+            if runtime is not None and hasattr(runtime, "record_feedback"):
+                runtime.record_feedback(memory)
 
     trace = ep.TaskRunTrace(
         phase="longmemeval",
@@ -1645,6 +1690,7 @@ def evaluate_final_round(
     }
 
 
+@ep.scoped_baseline
 def run_stream_task(
     trace_id: str,
     task_index: int,
@@ -1691,7 +1737,7 @@ def run_stream_task(
             final_answer = extract_final_answer(output)
             correct, _decision = judge_correctness(task, final_answer, args, prompt_bundle, answer_cache)
             entry = create_openqa_benign_memory(task, int(agent_id), output, correct)
-            _written, ds = ep.commit_memory(entry, "private", int(agent_id), args.method, private_memories, shared_memories, memory_backend)
+            _written, ds = ep.commit_memory(entry, "private", int(agent_id), args.method, private_memories, shared_memories, memory_backend, ingress_channel='agent_output')
             all_defense.extend(ds)
 
     inventory = ep.memory_inventory(private_memories, shared_memories, memory_backend)
@@ -1964,6 +2010,7 @@ def main() -> None:
                 log_progress(args, short_status(idx, len(examples), record, time.time() - t0))
 
     summary = summarize(records, args, poisoned_targets, private_memories, shared_memories, memory_backend)
+    summary["baseline_provenance"] = ep.baseline_run_provenance(args)
     text_memory_dir = dump_text_memory(args, private_memories, shared_memories, memory_backend, summary)
     summary["text_memory_dir"] = text_memory_dir
     summary_path = args.out.replace(".jsonl", ".summary.json")

@@ -33,13 +33,22 @@ def inspect_response(role: str, response: str, history, args: Any) -> tuple[str,
     try:
         raw = chat_completion(args, [{"role": "user", "content": prompt}], temperature=0, max_tokens=1024, response_format={"type": "json_object"})
         parsed = parse_json_object(raw)
+        if getattr(args, "strict_comparison", False):
+            if not isinstance(parsed, dict) or parsed.get("decision") not in {"safe", "unsafe"}:
+                raise ValueError("expected a safe/unsafe Inspector decision")
+            if parsed["decision"] == "unsafe":
+                revision = parsed.get("revision")
+                if not isinstance(revision, str) or not revision.strip() or revision.strip() == "<safe content>":
+                    raise ValueError("unsafe Inspector decision requires a nonempty revision")
         if parsed.get("decision") == "safe":
             return "safe", response
         revision = parsed.get("revision", response)
         if revision == "<safe content>":
             return "safe", response
         return "unsafe", str(revision)
-    except Exception:
+    except Exception as exc:
+        if getattr(args, "strict_comparison", False):
+            raise RuntimeError("Inspector judge failed or returned an invalid judgment") from exc
         return "safe", response
 
 

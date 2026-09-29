@@ -61,7 +61,7 @@ class OpenAICompatibleLLM(BaseLLM):
     def __init__(self, base_url: str, model: str, api_key: str = "EMPTY", timeout: int = 120) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self.api_key = api_key
+        self.api_key = (api_key if api_key and api_key != "EMPTY" else os.getenv("CHAT_API_KEY") or os.getenv("OPENAI_API_KEY") or "EMPTY")
         self.timeout = timeout
         self.default_max_tokens = int(os.environ.get("CHAT_MAX_TOKENS", "128"))
 
@@ -76,6 +76,8 @@ class OpenAICompatibleLLM(BaseLLM):
         }
         if max_tokens > 0:
             payload["max_tokens"] = max_tokens
+        if os.getenv("CHAT_DISABLE_THINKING") == "1":
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         stops = chat_stop_sequences()
         if stops:
             payload["stop"] = stops
@@ -102,8 +104,12 @@ class OpenAICompatibleLLM(BaseLLM):
         return out or [text[:128]]
 
 
+def _strict_backend(args, method=""):
+    from evaluate.defense_methods.full_runtime import FULL_METHODS, MEMORY_METHODS
+    return bool(getattr(args,"strict_comparison",False)) or (method or getattr(args,"method","")) in (*FULL_METHODS,*MEMORY_METHODS)
+
 class OpenAICompatibleEmbedder(BaseEmbedder):
-    def __init__(self, base_url: str, model: str, api_key: str = "EMPTY", fallback_dim: int = 3584, timeout: int = 60) -> None:
+    def __init__(self, base_url: str, model: str, api_key: str = "EMPTY", fallback_dim: int = 3584, timeout: int = 60, strict: bool = False) -> None:
         super().__init__()
         env_dim = os.environ.get("EMBEDDING_DIM")
         if env_dim:
@@ -112,10 +118,11 @@ class OpenAICompatibleEmbedder(BaseEmbedder):
             fallback_dim = 4096
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self.api_key = api_key
+        self.api_key = (api_key if api_key and api_key != "EMPTY" else os.getenv("EMBED_API_KEY") or "EMPTY")
         self.fallback_dim = fallback_dim
         self.embedding_dim = fallback_dim
         self.timeout = timeout
+        self.strict = strict
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         if not texts:
@@ -134,8 +141,11 @@ class OpenAICompatibleEmbedder(BaseEmbedder):
                     self.embedding_dim = len(embeddings[0])
                     self.fallback_dim = self.embedding_dim
                 return embeddings
-            except Exception:
-                pass
+            except Exception as exc:
+                if self.strict:
+                    raise RuntimeError("Strict baseline embedding request failed; no hash fallback") from exc
+        if self.strict:
+            raise RuntimeError("Strict baseline embedding requires requests")
         return [self._hash_embedding(text, self.fallback_dim) for text in texts]
 
     @staticmethod
@@ -395,7 +405,8 @@ class MemRLMemoryBackend:
         cfg_dir = os.path.join(store_dir, "configs", self.user_id)
         os.makedirs(cfg_dir, exist_ok=True)
         db_path = os.path.join(cfg_dir, "users.db")
-        api_key = getattr(self.args, "api_key", "EMPTY") or "EMPTY"
+        api_key = getattr(self.args, "api_key", "") or os.getenv("CHAT_API_KEY") or os.getenv("OPENAI_API_KEY") or "EMPTY"
+        embed_api_key = getattr(self.args, "embed_api_key", "") or os.getenv("EMBED_API_KEY") or api_key
         mos_config = {
             "chat_model": {
                 "backend": "openai",
@@ -421,7 +432,7 @@ class MemRLMemoryBackend:
                         "config": {
                             "provider": "openai",
                             "model_name_or_path": self.args.embed_model,
-                            "api_key": api_key,
+                            "api_key": embed_api_key,
                             "base_url": self.args.embed_base_url,
                         },
                     },
@@ -432,7 +443,9 @@ class MemRLMemoryBackend:
             "top_k": int(getattr(self.args, "top_k_memory", 3)),
         }
         self._mos_config_path = os.path.join(cfg_dir, "mos_config.json")
-        with open(self._mos_config_path, "w", encoding="utf-8") as f:
+        fd = os.open(self._mos_config_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(mos_config, f, ensure_ascii=False, indent=2)
 
         strategy = StrategyConfiguration.from_strings(
@@ -446,7 +459,7 @@ class MemRLMemoryBackend:
             weight_q=float(getattr(self.args, "memrl_weight_q", 0.5)),
         )
         llm = OpenAICompatibleLLM(self.args.chat_base_url, self.args.chat_model, api_key=api_key)
-        embedder = OpenAICompatibleEmbedder(self.args.embed_base_url, self.args.embed_model, api_key=api_key)
+        embedder = OpenAICompatibleEmbedder(self.args.embed_base_url, self.args.embed_model, api_key=embed_api_key, strict=_strict_backend(self.args))
         self._service = MemoryService(
             mos_config_path=self._mos_config_path,
             llm_provider=llm,
@@ -476,6 +489,9 @@ class MemRLMemoryBackend:
         self.entries[str(entry.memory_id)] = entry
         self.backend_ids[str(entry.memory_id)] = str(backend_id)
         setattr(entry, "backend_memory_id", str(backend_id))
+        # Storage ownership differs from provenance: a peer's message is stored
+        # in the recipient's private cube, while origin_agent remains its author.
+        setattr(entry, "backend_store_id", self.user_id)
         return str(backend_id)
 
     def retrieve_entries(
@@ -491,10 +507,14 @@ class MemRLMemoryBackend:
         service = self._ensure_service()
         try:
             raw = service.retrieve_query(task_description=query, k=max(top_k, 1), threshold=max(threshold, 0.0))
-        except Exception:
+        except Exception as exc:
+            if _strict_backend(self.args, method):
+                raise RuntimeError("Strict baseline backend retrieval failed; no strategy fallback") from exc
             raw = service.retrieve_value_aware(task_description=query, k=max(top_k, 1), threshold=max(threshold, 0.0))
         result = raw[0] if isinstance(raw, tuple) else raw
-        if str(method) == "maple_guard":
+        if bool(getattr(self.args, "strict_comparison", False)) or method in ("provenance_acl", "maple_guard_retrieval_only", "amemguard_full", "piguard_retrieval", "piguard_lifecycle"):
+            selected = result.get("candidates") or result.get("selected") or []
+        elif str(method) in ("maple_guard", "maple_guard_retrieval_only"):
             pool = result.get("candidates") or result.get("selected") or []
             selected = [pool] if isinstance(pool, dict) else list(pool)
             selected.sort(
@@ -514,8 +534,10 @@ class MemRLMemoryBackend:
 
     def update_value(self, entry: Any, success: bool) -> None:
         maple_guard_id = str(getattr(entry, "memory_id", ""))
-        backend_id = getattr(entry, "backend_memory_id", None) or self.backend_ids.get(maple_guard_id)
+        backend_id = self.backend_ids.get(maple_guard_id) or getattr(entry, "backend_memory_id", None)
         if not backend_id:
+            if _strict_backend(self.args):
+                raise RuntimeError("Strict baseline feedback requires a registered memory ID")
             return
         try:
             service = self._ensure_service()
@@ -525,7 +547,9 @@ class MemRLMemoryBackend:
                 entry.utility_q = float(new_q)
                 if maple_guard_id in self.entries:
                     self.entries[maple_guard_id].utility_q = float(new_q)
-        except Exception:
+        except Exception as exc:
+            if _strict_backend(self.args):
+                raise RuntimeError("Strict baseline feedback update failed") from exc
             return
 
     def _entry_to_metadata(self, entry: Any, success: bool) -> Dict[str, Any]:
@@ -549,6 +573,7 @@ class MemRLMemoryBackend:
             "taint": str(entry.taint),
             "status": "activated",
             "maple_guard_status": str(entry.status),
+            "baseline_metadata": dict(getattr(entry, "baseline_metadata", {})),
             "parents": list(entry.parents),
             "q_value": float(entry.utility_q),
             "success": bool(success),
@@ -586,11 +611,15 @@ class MemRLMemoryBackend:
                 content_hazard=float(md.get("content_hazard", 0.0) or 0.0),
                 taint=str(md.get("taint") or "unverified"),
                 status=str(md.get("maple_guard_status") or md.get("status") or "active").replace("activated", "active"),
+                baseline_metadata=dict(md.get("baseline_metadata") or {}),
                 parents=_as_str_list(md.get("parents")),
             )
             self.entries[maple_guard_id] = entry
         self.backend_ids[maple_guard_id] = backend_id
         setattr(entry, "backend_memory_id", backend_id)
+        # Reconstructed entries take their physical owner from this backend,
+        # never from author/scope fields in memory content or metadata.
+        setattr(entry, "backend_store_id", self.user_id)
         setattr(entry, "backend_score", candidate.get("score"))
         setattr(entry, "backend_similarity", candidate.get("similarity"))
         setattr(entry, "backend_maple_guard_score", candidate.get("maple_guard_backend_score"))
@@ -645,6 +674,18 @@ class MemoryBackendBundle:
         return self.shared_backend.retrieve_entries(query, top_k=top_k, threshold=threshold, method=method, agent_id=agent_id, task_class=task_class)
 
     def update_value(self, entry: Any, success: bool) -> None:
+        store_id = getattr(entry, "backend_store_id", None)
+        stores = [*self.private_backends.values(), self.shared_backend, self.quarantine_backend]
+        if store_id is not None:
+            for backend in stores:
+                if backend.user_id == store_id:
+                    backend.update_value(entry, success)
+                    return
+            raise RuntimeError("Feedback references a memory store outside this experiment")
+        if _strict_backend(self.args):
+            raise RuntimeError("Strict baseline feedback requires a registered physical memory store")
+        # Preserve the historical in-memory/legacy path for entries without a
+        # physical store marker; strict runs must never infer ownership from authorship.
         scope = getattr(entry, "memory_scope", "agent_private")
         if scope == "team":
             self.shared_backend.update_value(entry, success)

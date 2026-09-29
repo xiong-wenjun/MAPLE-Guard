@@ -288,6 +288,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-file", default=None)
     p.add_argument("--log-every", type=int, default=int(cfg_get(cfg, "experiment.log_every", 5)))
     p.add_argument("--seed", type=int, default=int(cfg_get(cfg, "experiment.seed", 42)))
+    ep.add_full_baseline_args(p, cfg)
     args = p.parse_args()
     args.method_explicit = any(arg == "--method" or arg.startswith("--method=") for arg in sys.argv[1:])
     return args
@@ -316,6 +317,7 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
         elif getattr(args, "defense_enabled", None) is False:
             args.method = ep.METHOD_NO_DEFENSE_MEMRL
     args.method = ep.normalize_method(args.method)
+    os.environ["CHAT_DISABLE_THINKING"] = "1" if getattr(args, "disable_chat_thinking", False) else "0"
     apply_attack_surface(args)
     args.attack_stealth_mode = ep.normalize_attack_stealth_mode(getattr(args, "attack_stealth_mode", ep.STEALTH_METADATA_CLEAN))
     if int(getattr(args, "chat_max_tokens", 0) or 0) > 0:
@@ -1093,7 +1095,7 @@ def maybe_promote_benign_to_shared(
     final_round_outputs = (task_trace.outputs_by_round[-1] if task_trace and getattr(task_trace, "outputs_by_round", None) else {})
     eligible_agent_ids: List[int] = []
     for agent_id in range(args.agents):
-        if agent_id in attacker_set:
+        if agent_id in attacker_set and not (ep.strict_runtime_active() or args.method in ep.FULL_METHODS):
             continue
         if float(agent_trust.get(agent_id, 0.5)) < min_trust:
             continue
@@ -1130,7 +1132,7 @@ def maybe_promote_benign_to_shared(
             float(agent_trust.get(origin_agent, 0.5)),
             args.agents,
         )
-        written, ds = ep.commit_memory(team_entry, "team", origin_agent, args.method, private_memories, shared_memories, memory_backend)
+        written, ds = ep.commit_memory(team_entry, "team", origin_agent, args.method, private_memories, shared_memories, memory_backend, ingress_channel='agent_output')
         decisions.extend(ds)
         if written:
             promoted_ids.append(team_entry.memory_id)
@@ -1440,6 +1442,7 @@ def compute_benign_round_effects(
     return effects
 
 
+@ep.scoped_baseline
 def run_stream_task(
     trace_id: str,
     task_index: int,
@@ -2194,6 +2197,7 @@ def main() -> None:
                 log_progress(args, short_status(idx, len(task_stream), record, time.time() - t0))
 
     summary = summarize_stream(records, args, poison_indices, poisoned_memory_targets, private_memories, shared_memories, memory_backend, agent_trust)
+    summary["baseline_provenance"] = ep.baseline_run_provenance(args)
     text_memory_dir = dump_text_memory(args, private_memories, shared_memories, memory_backend, summary)
     summary["text_memory_dir"] = text_memory_dir
     summary_path = args.out.replace(".jsonl", ".summary.json")

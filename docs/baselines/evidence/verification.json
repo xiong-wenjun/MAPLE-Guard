@@ -1,0 +1,28 @@
+{
+  "verified_at_utc": "2026-09-28T18:32:10.319275+00:00",
+  "scope": "software and source/model contract validation; not benchmark results",
+  "test_count": 173,
+  "test_failures": 0,
+  "test_errors": 0,
+  "test_command": "PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES= OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 INFA_NATIVE_SOURCE=/mnt/public/data/wj/baseline-references/INFA-Guard /mnt/public/data/wj/venvs/maple-baselines/bin/python -B -m unittest discover -s tests",
+  "checks": {
+    "modified_python_syntax": true,
+    "four_public_runner_cli_flags": true,
+    "all_eleven_matrix_commands_parse": true,
+    "git_diff_check": true
+  },
+  "piguard_real_checkpoint_parity": "piguard-cpu-parity.json",
+  "native_infa_trained_checkpoint_available": false,
+  "native_infa_random_fixture_is_benchmark_weight": false,
+  "full_benchmarks_executed": false,
+  "remaining_inputs": [
+    "benchmark dataset path",
+    "reachable chat and embedding model services",
+    "trained native INFA MyGAT dual-head checkpoint",
+    "AgentSafe criterion/policy/threshold fixed on development data"
+  ],
+  "preserved_checkpoints": {
+    "communication_gnn/longmemeval.pth": "c2331b7a1a57eb2faac1bc6a537937c724633bc6ddb7cafebd0b50794937a84b",
+    "communication_gnn/appworld.pth": "3e4983030e35cdf8da8d610fd5eb2f00023c2777c64ddfe174b00928631d9883"
+  }
+}

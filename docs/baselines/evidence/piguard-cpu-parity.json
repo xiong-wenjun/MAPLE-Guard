@@ -1,0 +1,266 @@
+{
+  "status": "passed_real_checkpoint_cpu_smoke_and_pipeline_parity",
+  "not_a_benchmark": true,
+  "source_revision": "1b5751e88bf7475acbedfc8eda795ce060307c84",
+  "hf_revision": "dd78b24e330193a22d2293ac66922dd4f982f563",
+  "local_snapshot": "/mnt/public/data/wj/baseline-references/PIGuard-hf-dd78b24",
+  "weight_sha256_verified": "f90b9806de93b6286cda517300d4b55e5ce2e5ccbf8339dc59be21ca0dd9a25e",
+  "weight_bytes": 737719272,
+  "python": "3.10.12 (main, Nov 20 2023, 15:14:05) [GCC 11.4.0]",
+  "platform": "Linux-5.15.0-119-generic-x86_64-with-glibc2.35",
+  "packages": {
+    "aiohappyeyeballs": "2.7.1",
+    "aiohttp": "3.14.3",
+    "aiosignal": "1.4.0",
+    "async-timeout": "5.0.1",
+    "attrs": "26.1.0",
+    "certifi": "2026.7.22",
+    "charset-normalizer": "3.5.1",
+    "einops": "0.8.2",
+    "filelock": "3.32.3",
+    "frozenlist": "1.8.0",
+    "fsspec": "2026.7.0",
+    "huggingface-hub": "0.24.5",
+    "idna": "3.20",
+    "Jinja2": "3.1.6",
+    "MarkupSafe": "3.0.3",
+    "mpmath": "1.3.0",
+    "multidict": "6.9.1",
+    "networkx": "3.4.2",
+    "numpy": "2.2.6",
+    "packaging": "24.1",
+    "propcache": "0.5.4",
+    "protobuf": "4.25.4",
+    "psutil": "7.2.2",
+    "pyparsing": "3.3.3",
+    "PyYAML": "6.0.3",
+    "regex": "2024.7.24",
+    "requests": "2.34.2",
+    "safetensors": "0.4.4",
+    "sentencepiece": "0.2.0",
+    "setuptools": "78.1.0",
+    "sympy": "1.14.0",
+    "tokenizers": "0.19.1",
+    "torch": "2.14.0+cpu",
+    "torch-geometric": "2.8.0.post1",
+    "torch_scatter": "2.1.2",
+    "tqdm": "4.70.1",
+    "transformers": "4.44.0",
+    "typing_extensions": "4.16.0",
+    "urllib3": "2.8.0",
+    "xxhash": "4.0.1",
+    "yarl": "1.25.1"
+  },
+  "installed_package_deviations_from_upstream_requirements": {
+    "aiohappyeyeballs": {
+      "installed": "2.7.1",
+      "upstream": "2.3.5"
+    },
+    "aiohttp": {
+      "installed": "3.14.3",
+      "upstream": "3.10.3"
+    },
+    "aiosignal": {
+      "installed": "1.4.0",
+      "upstream": "1.3.1"
+    },
+    "async-timeout": {
+      "installed": "5.0.1",
+      "upstream": "4.0.3"
+    },
+    "attrs": {
+      "installed": "26.1.0",
+      "upstream": "24.2.0"
+    },
+    "certifi": {
+      "installed": "2026.7.22",
+      "upstream": "2022.12.7"
+    },
+    "charset-normalizer": {
+      "installed": "3.5.1",
+      "upstream": "2.1.1"
+    },
+    "filelock": {
+      "installed": "3.32.3",
+      "upstream": "3.13.1"
+    },
+    "frozenlist": {
+      "installed": "1.8.0",
+      "upstream": "1.4.1"
+    },
+    "fsspec": {
+      "installed": "2026.7.0",
+      "upstream": "2024.2.0"
+    },
+    "idna": {
+      "installed": "3.20",
+      "upstream": "3.4"
+    },
+    "Jinja2": {
+      "installed": "3.1.6",
+      "upstream": "3.1.3"
+    },
+    "MarkupSafe": {
+      "installed": "3.0.3",
+      "upstream": "2.1.5"
+    },
+    "multidict": {
+      "installed": "6.9.1",
+      "upstream": "6.0.5"
+    },
+    "networkx": {
+      "installed": "3.4.2",
+      "upstream": "3.2.1"
+    },
+    "numpy": {
+      "installed": "2.2.6",
+      "upstream": "1.26.3"
+    },
+    "psutil": {
+      "installed": "7.2.2",
+      "upstream": "6.0.0"
+    },
+    "pyparsing": {
+      "installed": "3.3.3",
+      "upstream": "3.1.2"
+    },
+    "PyYAML": {
+      "installed": "6.0.3",
+      "upstream": "6.0.2"
+    },
+    "requests": {
+      "installed": "2.34.2",
+      "upstream": "2.32.3"
+    },
+    "sympy": {
+      "installed": "1.14.0",
+      "upstream": "1.12"
+    },
+    "torch": {
+      "installed": "2.14.0+cpu",
+      "upstream": "2.4.0"
+    },
+    "tqdm": {
+      "installed": "4.70.1",
+      "upstream": "4.66.5"
+    },
+    "typing_extensions": {
+      "installed": "4.16.0",
+      "upstream": "4.12.2"
+    },
+    "urllib3": {
+      "installed": "2.8.0",
+      "upstream": "1.26.13"
+    },
+    "xxhash": {
+      "installed": "4.0.1",
+      "upstream": "3.4.1"
+    },
+    "yarl": {
+      "installed": "1.25.1",
+      "upstream": "1.9.4"
+    }
+  },
+  "environment_note": "Minimal inference dependencies, not the full upstream training environment. Existing CPU Torch and other existing packages were preserved.",
+  "device": "cpu",
+  "torch_num_threads": 2,
+  "loaded_model_class": "transformers_modules.PIGuard-hf-dd78b24.modeling_piguard.PIGuard",
+  "tokenizer_class": "DebertaV2TokenizerFast",
+  "tokenizer_is_fast": true,
+  "comparison": "Same pinned custom model and tokenizer loaded locally; adapter batch and single outputs compared against official Transformers pipeline single-item execution at max_length=512. top_k=None exposes both class probabilities; default pipeline additionally checked for winning-label agreement.",
+  "absolute_tolerance": 2e-06,
+  "maximum_absolute_batch_pipeline_difference": 8.940696716308594e-08,
+  "maximum_absolute_single_pipeline_difference": 1.4901161193847656e-08,
+  "elapsed_seconds": 9.260134316980839,
+  "cases": [
+    {
+      "case": "benign_question",
+      "text_characters": 35,
+      "tokens_before_truncation": 11,
+      "retained_tokens": 11,
+      "adapter_batch_injection_probability": 0.0014295431319624186,
+      "adapter_single_injection_probability": 0.0014295410364866257,
+      "official_pipeline_injection_probability": 0.0014295410364866257,
+      "official_pipeline_top_class": {
+        "label": "benign",
+        "score": 0.998570442199707
+      },
+      "adapter_blocks_at_0_5": false
+    },
+    {
+      "case": "official_injection_example",
+      "text_characters": 28,
+      "tokens_before_truncation": 5,
+      "retained_tokens": 5,
+      "adapter_batch_injection_probability": 0.9999356269836426,
+      "adapter_single_injection_probability": 0.9999356269836426,
+      "official_pipeline_injection_probability": 0.9999356269836426,
+      "official_pipeline_top_class": {
+        "label": "injection",
+        "score": 0.9999356269836426
+      },
+      "adapter_blocks_at_0_5": true
+    },
+    {
+      "case": "empty_text",
+      "text_characters": 0,
+      "tokens_before_truncation": 2,
+      "retained_tokens": 2,
+      "adapter_batch_injection_probability": 0.11404532939195633,
+      "adapter_single_injection_probability": 0.11404523998498917,
+      "official_pipeline_injection_probability": 0.11404523998498917,
+      "official_pipeline_top_class": {
+        "label": "benign",
+        "score": 0.8859547972679138
+      },
+      "adapter_blocks_at_0_5": false
+    },
+    {
+      "case": "long_input_with_suffix_injection",
+      "text_characters": 9785,
+      "tokens_before_truncation": 1452,
+      "retained_tokens": 512,
+      "adapter_batch_injection_probability": 0.12645496428012848,
+      "adapter_single_injection_probability": 0.12645494937896729,
+      "official_pipeline_injection_probability": 0.1264549344778061,
+      "official_pipeline_top_class": {
+        "label": "benign",
+        "score": 0.8735451102256775
+      },
+      "adapter_blocks_at_0_5": false
+    }
+  ],
+  "adapter_provenance": {
+    "detector": "PIGuard",
+    "source_url": "https://github.com/leolee99/PIGuard",
+    "source_revision": "1b5751e88bf7475acbedfc8eda795ce060307c84",
+    "model": "/mnt/public/data/wj/baseline-references/PIGuard-hf-dd78b24",
+    "model_revision": "dd78b24e330193a22d2293ac66922dd4f982f563",
+    "tokenizer_revision": "dd78b24e330193a22d2293ac66922dd4f982f563",
+    "official_model_requested": false,
+    "profile": "official_hf_inference_examples_512",
+    "id2label": {
+      "0": "benign",
+      "1": "injection"
+    },
+    "score": "softmax(logits, dim=-1)[:, 1]",
+    "threshold": 0.5,
+    "decision_rule": "block if injection_probability > threshold; ties allowed",
+    "max_length": 512,
+    "truncation": true,
+    "padding": "longest_in_batch",
+    "use_fast": true,
+    "device": "cpu",
+    "dtype": "float32",
+    "trust_remote_code": true,
+    "injected_loaders": false,
+    "chunking": false,
+    "fallback": false,
+    "counters": {
+      "calls": 5,
+      "model_calls": 5,
+      "texts_scored": 8,
+      "errors": 0
+    }
+  }
+}
