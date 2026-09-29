@@ -46,6 +46,7 @@ class CsqaBundleWiringTests(unittest.TestCase):
         self.assertEqual(args.benchmark_bundle,"bundle.json")
         self.assertEqual(args.official_defense_guardian_profile,"released_detector")
         self.assertEqual(args.official_defense_guardian_epochs,20)
+        self.assertEqual(args.chat_timeout,180)
 
     def test_bundle_preserves_five_choices_ids_and_paired_order(self):
         self.assertTrue(hasattr(runner,"load_csqa_bundle_cases"),"frozen CSQA bundle loader missing")
@@ -103,7 +104,8 @@ class CsqaBundleWiringTests(unittest.TestCase):
     def test_comparison_runner_preserves_actual_conversation_history(self):
         with tempfile.TemporaryDirectory() as root:
             with patch.object(sys,"argv",["runner","--attack-mode","PI","--chat-base-url","http://unused/v1",
-                                         "--output-root",root,"--strict-comparison","--agents","1","--rounds","1"]):
+                                         "--output-root",root,"--strict-comparison","--agents","1","--rounds","1",
+                                         "--chat-timeout","600"]):
                 args=runner.parse_args()
             args.write_final_json=False;args.stream_memories=False;args.progress_every=0
             case=dict(source_bundle_id="commonsenseqa:dev:test",question="Q?\nA. yes\nB. no",
@@ -112,6 +114,8 @@ class CsqaBundleWiringTests(unittest.TestCase):
             calls=[]
             def generate(base,model,messages,**kwargs):
                 calls.append(list(messages))
+                self.assertEqual(kwargs["timeout"],600)
+                self.assertEqual(kwargs["max_tokens"],args.max_tokens)
                 return "Reason: retained evidence\n<ANSWER>: A"
             with patch.object(runner,"first_prompt",return_value="initial question"), \
                  patch.object(runner,"regen_prompt",return_value="follow-up peer context"), \
@@ -122,3 +126,12 @@ class CsqaBundleWiringTests(unittest.TestCase):
             self.assertEqual(len(calls),2)
             self.assertTrue(any(m["role"]=="assistant" and "retained evidence" in m["content"] for m in calls[1]),
                             "Strict comparison discarded the previous conversation turn")
+
+
+    def test_chat_timeout_rejects_nonpositive_and_nonfinite_values(self):
+        for value in ("0", "-1", "nan", "inf"):
+            with self.subTest(value=value), patch.object(sys, "argv", [
+                    "runner", "--attack-mode", "PI", "--chat-base-url", "http://unused/v1",
+                    "--chat-timeout", value]), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    runner.parse_args()
