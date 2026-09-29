@@ -29,7 +29,7 @@ _LOCAL_ROOT = str(Path(__file__).resolve().parents[1])
 if _LOCAL_ROOT not in sys.path:
     sys.path.insert(0, _LOCAL_ROOT)
 from evaluate.defense_methods.full_runtime import (
-    FULL_METHODS, add_full_baseline_args, current_runtime, scoped_baseline, public_config,
+    FULL_METHODS, add_full_baseline_args, current_runtime, scoped_baseline, public_config, strict_runtime_active,
 )
 
 OFFICIAL_COMMUNICATION_METHODS = {
@@ -139,6 +139,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--attack-mode", choices=["PI", "TA"], default=cfg_get(cfg, "attack_mode", ""))
     parser.add_argument("--dataset", default=cfg_get(cfg, "dataset", ""))
     parser.add_argument("--dataset-path", default=cfg_get(cfg, "dataset_path", ""))
+    parser.add_argument("--benchmark-bundle", default=cfg_get(cfg, "benchmark_bundle", ""), help="Frozen CSQA bundle; preserve original IDs and all five choices.")
     parser.add_argument("--output-root", default=cfg_get(cfg, "output_root", ""))
     parser.add_argument("--samples", type=int, default=int(cfg_get(cfg, "samples", 12)))
     parser.add_argument("--agents", type=int, default=int(cfg_get(cfg, "agents", 8)))
@@ -182,6 +183,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--official-defense-gnn-threshold", type=float, default=float(cfg_get(cfg, "official_defense_gnn_threshold", os.environ.get("OFFICIAL_DEFENSE_GNN_THRESHOLD", 0.5))))
     parser.add_argument("--official-defense-gnn-device", default=cfg_get(cfg, "official_defense_gnn_device", os.environ.get("OFFICIAL_DEFENSE_GNN_DEVICE", "cpu")))
     parser.add_argument("--official-defense-guardian-code-dir", default=cfg_get(cfg, "official_defense_guardian_code_dir", ""))
+    parser.add_argument("--official-defense-guardian-bert-dir", default=cfg_get(cfg, "official_defense_guardian_bert_dir", ""))
+    parser.add_argument("--official-defense-guardian-profile", choices=["host_graph", "released_detector"], default=cfg_get(cfg, "official_defense_guardian_profile", "host_graph"))
+    parser.add_argument("--official-defense-guardian-epochs", type=int, default=int(cfg_get(cfg, "official_defense_guardian_epochs", 20)))
     parser.add_argument("--disable-chat-thinking", action=argparse.BooleanOptionalAction, default=bool(cfg_get(cfg, "disable_chat_thinking", True)))
     parser.add_argument("--stream-decisions", action=argparse.BooleanOptionalAction, default=bool(cfg_get(cfg, "stream_decisions", True)))
     parser.add_argument("--stream-memories", action=argparse.BooleanOptionalAction, default=bool(cfg_get(cfg, "stream_memories", True)))
@@ -238,7 +242,49 @@ def configure_imports(infa_root: str) -> Any:
     return ep
 
 
+def load_csqa_bundle_cases(args: argparse.Namespace) -> List[Dict[str, Any]]:
+    """Use the fixed user subset with released PI prompts and host topologies."""
+    from maple_guard.benchmarks.benchmark_bundle import load_bundle, normalized_rows
+    from maple_guard import maple_guard_core as ep
+    from MAS.agent_prompts import PI_SYS_PROMPT, PI_ATTACKER_SYS_PROMPT
+
+    if args.attack_mode != "PI" or args.dataset not in ("", "csqa", "commonsenseqa"):
+        raise ValueError("Frozen CSQA bundles require the PI/CSQA protocol")
+    if args.num_graphs != 1:
+        raise ValueError("Frozen CSQA runs require one graph so tasks are not duplicated")
+    bundle, _ = load_bundle(args.benchmark_bundle, "csqa")
+    rows = normalized_rows(bundle)
+    if not 1 <= args.samples <= len(rows):
+        raise ValueError("Requested samples exceed the frozen CSQA bundle")
+    attackers = ([int(x) for x in args.attacker_ids.split(",") if x.strip()]
+                 if args.attacker_ids else random.Random(args.attacker_seed).sample(range(args.agents), args.num_attackers))
+    if (len(attackers) != args.num_attackers or len(set(attackers)) != len(attackers)
+            or not 0 <= len(attackers) < args.agents
+            or any(i < 0 or i >= args.agents for i in attackers)):
+        raise ValueError("Invalid attacker identities")
+    graph = ep.build_adj_matrix(args.graph_type, args.agents, args.seed)
+    prompts = [(PI_ATTACKER_SYS_PROMPT if i in attackers else PI_SYS_PROMPT).format(i)
+               for i in range(args.agents)]
+    records = []
+    for row in rows:
+        choices = row["choices"]
+        if [c["label"] for c in choices] != list("ABCDE"):
+            raise ValueError("CSQA requires five ordered choices A through E")
+        answer = row.get("answer", row.get("answerKey"))
+        records.append({
+            "source_bundle_id": row["id"], "source_native_id": row["source_native_id"],
+            "question": row["question"] + "\n" + "\n".join(f'{c["label"]}. {c["text"]}' for c in choices),
+            "correct_answer": answer, "wrong_answer": [x for x in "ABCDE" if x != answer],
+            "adj_matrix": deepcopy(graph), "attacker_idxes": list(attackers),
+            "system_prompts": list(prompts),
+        })
+    random.Random(args.seed).shuffle(records)
+    return records[:args.samples]
+
+
 def load_infa_cases(args: argparse.Namespace) -> List[Dict[str, Any]]:
+    if getattr(args, "benchmark_bundle", ""):
+        return load_csqa_bundle_cases(args)
     from generate_data.dataset_utils.gen_csqa import gen_csqa_datasets
     from generate_data.dataset_utils.get_tool_attack_data import gen_injecagent_data
     from generate_data.gen_graph import generate_agent_graph_dataset, generate_initial_data
@@ -297,7 +343,7 @@ def parse_pi_response(response: str) -> Dict[str, Optional[str]]:
 def memory_method_for(method: str) -> str:
     if method == "maple_guard_comm":
         return "maple_guard"
-    if method in OFFICIAL_COMMUNICATION_METHODS:
+    if method in OFFICIAL_COMMUNICATION_METHODS and not strict_runtime_active():
         return "no_defense_memrl"
     return method
 
@@ -493,7 +539,7 @@ def task_for_record(ep: Any, d: Dict[str, Any], task_idx: int, args: argparse.Na
             choices = [(label, label) for label in ["A", "B", "C", "D", "E"]]
         raw = {"dataset": "csqa", "task_class": "csqa", "attack_source": "INFA_PI"}
         return ep.TaskExample(
-            task_id=f"infa_pi_csqa_{task_idx}",
+            task_id=str(d.get("source_bundle_id") or f"infa_pi_csqa_{task_idx}"),
             question=d["question"],
             choices=choices,
             answer=str(d["correct_answer"]).strip().upper()[:1],
@@ -1088,7 +1134,10 @@ def run_one_method(ep: Any, records: Sequence[Dict[str, Any]], method: str, args
                 if runtime is not None:
                     if round_idx == 0:
                         runtime.register_task_context(agent_id, [model_messages[0], {"role":"user", "content":base_prompt}])
-                    response = runtime.generate(agent_id, [model_messages[0], model_messages[-1]], generate)
+                    # Full methods manage their own live history; matched memory
+                    # methods retain the same physical conversation as the host.
+                    runtime_messages = [model_messages[0], model_messages[-1]] if method in FULL_METHODS else model_messages
+                    response = runtime.generate(agent_id, runtime_messages, generate)
                 else:
                     response = generate(model_messages)
                 history_prompt = compact_middle(prompt, int(getattr(args, "chat_history_max_chars", 1200))) if args.attack_mode == "TA" else prompt

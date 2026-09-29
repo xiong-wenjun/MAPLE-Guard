@@ -61,7 +61,7 @@ def main():
     sys.path.insert(0,str(root))
     if len(sys.argv)<3:raise SystemExit("usage: run_instrumented.py MODULE ARGS...")
     module=sys.argv[1]
-    if module not in ("maple_guard.run_appworld","maple_guard.run_mmlu","maple_guard.run_longmemeval"):
+    if module not in ("maple_guard.run_appworld","maple_guard.run_mmlu","maple_guard.run_longmemeval","maple_guard.infa_memlink_eval"):
         raise ValueError("Unsupported benchmark module")
     log=os.environ["MAPLE_CALL_LOG"]
     install_metrics(log,os.getenv("MAPLE_FAIL_ON_TRUNCATION")=="1")
