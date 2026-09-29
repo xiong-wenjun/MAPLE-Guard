@@ -175,7 +175,20 @@ def embed_batches(texts, transport, batch_size, max_requests):
     return result
 
 
-def remote_transport(service, journal_path, timeout):
+def embedding_request_protocol(input_mode, batch_size):
+    if input_mode not in ("batch", "scalar") or not 1 <= batch_size <= 16:
+        raise ValueError("Unknown embedding transport mode or invalid batch size")
+    if input_mode == "scalar" and batch_size != 1:
+        raise ValueError("Scalar embedding transport requires batch size 1")
+    return {"input_shape": "string" if input_mode == "scalar" else "list",
+            "batch_size": batch_size,
+            "encoding_format": None if input_mode == "scalar" else "float",
+            "encoding_format_policy": "omitted" if input_mode == "scalar" else "explicit",
+            "input_prefix": None}
+
+
+def remote_transport(service, journal_path, timeout, input_mode="batch", batch_size=16):
+    protocol = embedding_request_protocol(input_mode, batch_size)
     count = 0
     def request(method, endpoint, body=None):
         payload = None if body is None else json.dumps(body).encode()
@@ -199,12 +212,16 @@ def remote_transport(service, journal_path, timeout):
         "source_host": service.get("source_host"), "verified_model_ids": ids,
         "verified_at": utcnow(), "asset_revision": service.get("revision"),
         "asset_identity_scope": "served model ID and frozen criterion geometry; weights revision may be unavailable",
-        "normalization": "L2", "input_prefix": None}
+        "normalization": "L2", "input_prefix": None, "request_protocol": protocol}
     def embed(texts):
         nonlocal count
+        if input_mode == "scalar" and len(texts) != 1:
+            raise ValueError("Scalar embedding request requires exactly one text")
+        payload = {"model": service["model"], "input": texts[0] if input_mode == "scalar" else texts}
+        if input_mode == "batch":
+            payload["encoding_format"] = "float"
         count += 1
-        data, code = request("POST", "/embeddings", {"model": service["model"], "input": texts,
-                                                   "encoding_format": "float"})
+        data, code = request("POST", "/embeddings", payload)
         rows = data.get("data", [])
         if sorted(row.get("index") for row in rows) != list(range(len(texts))):
             raise ValueError("Embedding response indexes differ from request inputs")
@@ -212,6 +229,7 @@ def remote_transport(service, journal_path, timeout):
         with Path(journal_path).open("a") as handle:
             handle.write(json.dumps({"request": count, "input_count": len(texts),
                 "http_status": code, "model": service["model"], "time": utcnow(),
+                "request_protocol": protocol,
                 "input_sha256": [hashlib.sha256(t.encode()).hexdigest() for t in texts]}) + "\n")
         print(json.dumps({"embedding_batch": count, "texts": len(texts)}), flush=True)
         return [row["embedding"] for row in rows]
@@ -230,10 +248,13 @@ def main(argv=None):
     parser.add_argument("--validation-questions", type=int, default=32)
     parser.add_argument("--benign-fpr-budget", type=float, default=.01)
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--transport-mode", choices=("batch", "scalar"), default="batch")
+    parser.add_argument("--protocol-revision-note")
     parser.add_argument("--max-embedding-requests", type=int, default=17)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
+    request_protocol = embedding_request_protocol(args.transport_mode, args.batch_size)
     train_dir = Path(args.train_dir)
     train = train_dir/"train-00000-of-00001.parquet"
     provenance_path = train_dir/"provenance.json"
@@ -275,6 +296,8 @@ def main(argv=None):
         "corruption_types": ["cross_task_authority_override", "false_answer_with_persistence"],
         "embedding_text_count": len(texts), "embedding_request_count": needed,
         "max_embedding_requests": args.max_embedding_requests, "max_retries": 0,
+        "embedding_request_protocol": request_protocol,
+        "protocol_revision_note": args.protocol_revision_note,
         "other_api_requests": "one read-only /models request, no chat requests",
         "tool_sha256": sha256(__file__), "calibration_questions": args.calibration_questions,
         "validation_questions": args.validation_questions}
@@ -287,7 +310,8 @@ def main(argv=None):
     if credentials.stat().st_mode & 0o077:
         raise ValueError("Service credentials must not be group/world accessible")
     service = json.loads(credentials.read_text())["embedding"]
-    transport, encoder = remote_transport(service, out/"embedding-calls.jsonl", args.timeout)
+    transport, encoder = remote_transport(service, out/"embedding-calls.jsonl", args.timeout,
+                                          input_mode=args.transport_mode, batch_size=args.batch_size)
     vectors = embed_batches(texts, transport, args.batch_size, args.max_embedding_requests)
     criterion_vectors = [normalized(v) for v in vectors[:len(criteria)]]
     save_new(out/"criterion-vectors.json", criterion_vectors)
