@@ -27,6 +27,10 @@ class AgentSafeFull:
                  embed: Callable[[str], list[float]]):
         self.judge = judge
         self.embed = embed
+        self.profile = getattr(args, "agentsafe_profile", "paper_components")
+        if self.profile not in ("paper_components", "paper_v2_adapted"):
+            raise AgentSafeConfigError("Unknown AgentSafe reproduction profile")
+        self.calibration_manifest_sha256 = None
         try:
             with open(args.agentsafe_policy_file, encoding="utf-8") as handle:
                 self.policy = self._decode(handle.read())
@@ -65,10 +69,67 @@ class AgentSafeFull:
         except (OSError, ValueError, TypeError, AttributeError, OverflowError) as exc:
             raise AgentSafeConfigError(f"Invalid AgentSafe configuration: {exc}") from exc
         self.criterion_vectors = [self._vector(text) for text in self.criteria]
+        if self.profile == "paper_v2_adapted":
+            self._verify_calibration(args)
         self.junk = {}
         self.memory = {}
         self._cache = {}
         self._config_fingerprint = self._fingerprint({"policy": self.policy, "criteria": self.criteria, "threshold": self.threshold, "criterion_vectors": self.criterion_vectors})
+        if self.profile == "paper_v2_adapted":
+            self._config_fingerprint = self._fingerprint({"component": self._config_fingerprint,
+                "profile": self.profile, "calibration_manifest_sha256": self.calibration_manifest_sha256})
+        self.provenance = {"source_commit": "cc253ad48532fa6614a27557587086cfb87968ed",
+            "profile": self.profile if self.profile == "paper_v2_adapted" else "paper_components_maple_adaptation",
+            "reporting_label": "AgentSafe (full-component adaptation)",
+            "official_configuration_recovered": False, "policy_fingerprint": self._config_fingerprint,
+            "calibration_manifest_sha256": self.calibration_manifest_sha256,
+            "permission_rule": "message_level <= pair_based_recipient_clearance",
+            "shared_admission": "recipient permission checked at actual read or route",
+            "review_interval": self.review_interval}
+
+    def _verify_calibration(self, args):
+        """Bind the opt-in profile to independent calibration without altering legacy runs."""
+        try:
+            with open(args.agentsafe_calibration_manifest, "rb") as handle:
+                raw = handle.read()
+            manifest = self._decode(raw.decode("utf-8"))
+            if manifest.get("status") != "frozen" or manifest.get("profile") != self.profile:
+                raise ValueError("calibration is not frozen for this profile")
+            with open(args.agentsafe_criteria_file, "rb") as handle:
+                criteria_digest = hashlib.sha256(handle.read()).hexdigest()
+            if manifest.get("criteria_sha256") != criteria_digest:
+                raise ValueError("criteria differ from frozen calibration")
+            if type(manifest.get("threshold")) not in (int, float) or manifest["threshold"] != self.threshold:
+                raise ValueError("threshold differs from frozen calibration")
+            if manifest.get("review_interval") != self.review_interval:
+                raise ValueError("review interval differs from frozen calibration")
+            if manifest.get("score_rule") != "min_all_criterion_cosine_strict_gt":
+                raise ValueError("calibration uses a different scoring rule")
+            if manifest.get("encoder", {}).get("model") != getattr(args, "embed_model", None):
+                raise ValueError("embedding model differs from frozen calibration")
+            expected = manifest.get("criterion_vectors")
+            if not isinstance(expected, list) or len(expected) != len(self.criterion_vectors):
+                raise ValueError("calibration criterion vectors missing or wrong size")
+            frozen_vectors = []
+            for actual, vector in zip(self.criterion_vectors, expected):
+                if not isinstance(vector, list) or len(actual) != len(vector):
+                    raise ValueError("calibration embedding dimension changed")
+                if any(type(x) not in (int, float) or not math.isfinite(x) for x in vector):
+                    raise ValueError("invalid calibration embedding")
+                norm = math.hypot(*vector)
+                if not norm or not math.isfinite(norm):
+                    raise ValueError("invalid calibration embedding norm")
+                frozen = [b / norm for b in vector]
+                frozen_vectors.append(frozen)
+                cosine = math.fsum(a * b for a,b in zip(actual, frozen))
+                if abs(1.0 - cosine) > 1e-5:
+                    raise ValueError("live criterion embedding geometry differs from calibration")
+            # Match calibration arithmetic and retain stable criterion geometry;
+            # live embeddings above validate the endpoint rather than redefining it.
+            self.criterion_vectors = frozen_vectors
+            self.calibration_manifest_sha256 = hashlib.sha256(raw).hexdigest()
+        except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            raise AgentSafeConfigError(f"Invalid AgentSafe calibration: {exc}") from exc
 
     @staticmethod
     def _fingerprint(value):

@@ -1,0 +1,271 @@
+{
+  "schema_version": 1,
+  "audit_date": "2026-09-29",
+  "official_configuration_recovered": false,
+  "launchable_original_paper_experiment": false,
+  "source": {
+    "source_revision": "cc253ad48532fa6614a27557587086cfb87968ed",
+    "source_sha256": {
+      "Code/agents.py": "077ccaf634a947ecd915f0c83045c609b9d868e8eaf51d3743e58ac63b529bf1",
+      "Code/attack.py": "513c8e357466ffabfdaf937565afff7a0658dc4085d26f68fbb5344694346f93",
+      "Code/groups.py": "992e5ab112591d1d3f91d9765f958cd1b5b872f8e4d5fbd63adc2741cb23c181",
+      "Code/initial.py": "0ad770d71d8e17fa3b709917cee59d33ecf01c437e532815a13e40797db20a94",
+      "Code/process.py": "2a52ee2a2d507d0e5598b48dca70edbb5e96d8bf5ae00307edadc730078f3460"
+    }
+  },
+  "public_surface": {
+    "branches": [
+      "main"
+    ],
+    "tags": [],
+    "releases": [],
+    "commit_count": 13,
+    "history_tree_count": 13,
+    "unique_python_blob_count": 10,
+    "historical_blob_errors": [],
+    "notebooks": [],
+    "current_tree": [
+      "Code",
+      "Code/agents.py",
+      "Code/attack.py",
+      "Code/groups.py",
+      "Code/initial.py",
+      "Code/process.py",
+      "README.md",
+      "dataset",
+      "dataset/RIOH.jsonl",
+      "dataset/WCEI.jsonl"
+    ]
+  },
+  "paper": {
+    "requested_version": "2503.04392v1",
+    "latest_version": "2503.04392v2",
+    "latest_submitted_utc": "2025-07-08T04:14:01Z",
+    "source_archives": [
+      {
+        "name": "arxiv_v2_source.tar",
+        "url": "https://arxiv.org/src/2503.04392v2",
+        "bytes": 2604992,
+        "sha256": "2b6a153856b5a2001adf14fc21f8e292e6f226c6269c08b5a78c6b6f1481dfbd"
+      },
+      {
+        "name": "arxiv_v1_source.tar",
+        "url": "https://arxiv.org/src/2503.04392v1",
+        "bytes": 2604755,
+        "sha256": "5251a33fa61c60b323d8b947fa17a34c7e42a9d377986a09f398fa85eb604517"
+      }
+    ],
+    "supplement_contents": "TeX/bibliography/style files and figure PNGs; no runnable experiment configuration or criterion library"
+  },
+  "recoverable": {
+    "main_table": {
+      "value": {
+        "datasets": [
+          "RIOH",
+          "WCEI"
+        ],
+        "agents": 7,
+        "benign_agents": 6,
+        "attackers": 1,
+        "interaction_turns": 10
+      },
+      "source": "https://arxiv.org/html/2503.04392v2#S3.T1"
+    },
+    "models": {
+      "value": [
+        "Llama 3.2",
+        "GPT-3.5-Turbo",
+        "GPT-4o",
+        "GPT-4o-mini",
+        "GPT-4"
+      ],
+      "source": "https://arxiv.org/html/2503.04392v2#S4.SS1"
+    },
+    "memory_levels": {
+      "value": {
+        "Stranger": 1,
+        "Colleague": 2,
+        "Friend": 3,
+        "Family": 4
+      },
+      "source": "https://github.com/junyuanM/Agentsafe/blob/cc253ad48532fa6614a27557587086cfb87968ed/Code/agents.py#L39-L44"
+    },
+    "relations": {
+      "value": "uniform symmetric random relationships per unordered agent pair",
+      "source": "https://github.com/junyuanM/Agentsafe/blob/cc253ad48532fa6614a27557587086cfb87968ed/Code/initial.py#L56-L67"
+    },
+    "criteria_rule": {
+      "value": "all natural-language criteria must have Sim(message, criterion) > theta",
+      "source": "https://arxiv.org/html/2503.04392v2#S3.E8"
+    },
+    "algorithm_review_interval": {
+      "value": 1,
+      "scope": "literal Algorithm 1 loop structure; not proof of cadence used to obtain paper tables",
+      "source": "arxiv v2 source acl_latex.tex:239-269"
+    },
+    "v2_permission_correction": {
+      "v1": "sender permission >= receiver permission",
+      "v2": "information security level <= receiver permission",
+      "sources": [
+        "arxiv v2 source 4_method.tex:71-80",
+        "arxiv v2 source acl_latex.tex:239-245"
+      ],
+      "note": "v2 prose retains older sender/receiver wording, so version and implemented rule must be stated"
+    },
+    "appendix_h": {
+      "value": "with/without periodic detection reported at interaction turns 5,10,15,20,25,30",
+      "source": "https://arxiv.org/html/2503.04392v2#A8",
+      "not_a_review_period": true
+    }
+  },
+  "unrecovered": {
+    "instruction_library": null,
+    "admission_theta": null,
+    "admission_encoder": null,
+    "original_relation_seed_and_instance": null,
+    "full_identity_extraction_matching_prompts": null,
+    "original_experiment_inference_parameters": null,
+    "numeric_review_cadence_for_reported_tables": null
+  },
+  "excluded_substitutions": {
+    "released_process_py": {
+      "encoder": "text-embedding-ada-002",
+      "threshold": 0.2,
+      "role": "attack result assessment only; cannot recover admission settings"
+    },
+    "paper_approximately_0_7": {
+      "role": "reported memory-attack result, not theta"
+    },
+    "appendix_h_5": {
+      "role": "reporting turn, not review cadence"
+    }
+  },
+  "candidate_config": "configs/baselines/agentsafe_appworld_candidate.json",
+  "policy_manifest": {
+    "path": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/manifest.json",
+    "sha256": "810f6e727a36b697d7971c384f9545e95a269afc7ee86a7d6b0e55698d14fd26",
+    "policies": [
+      {
+        "seed": 42,
+        "policy": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/seed42/maple-policy.json",
+        "sha256": "75a69a88ad30b5c3e42162ff833c6fe161637df94998fec7197f74a266a48448",
+        "directed_pairs": 56
+      },
+      {
+        "seed": 43,
+        "policy": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/seed43/maple-policy.json",
+        "sha256": "d8a51cb49022debdb63ebcfbe7c79f8e507f5a39243008714ae1abe5d711c0e9",
+        "directed_pairs": 56
+      },
+      {
+        "seed": 44,
+        "policy": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/seed44/maple-policy.json",
+        "sha256": "65af856a56f24587cb17ae159d1dc6f276c3cc99133c7041e314523c2b24d9e3",
+        "directed_pairs": 56
+      },
+      {
+        "seed": 45,
+        "policy": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/seed45/maple-policy.json",
+        "sha256": "78a6c389a206136d72a88d4b7adb46f5c6227233fe72c248a3d3d53fddcfdcc2",
+        "directed_pairs": 56
+      },
+      {
+        "seed": 46,
+        "policy": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/seed46/maple-policy.json",
+        "sha256": "6abbd75295537d5e1c9f0e7845983b8798096c93eda5aa51fa5bc372d5b104d3",
+        "directed_pairs": 56
+      },
+      {
+        "seed": 47,
+        "policy": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/seed47/maple-policy.json",
+        "sha256": "b080c4344a6c774973def8737bcc6b6d10eab389b259dc34b85ce7b22a2c74eb",
+        "directed_pairs": 56
+      },
+      {
+        "seed": 48,
+        "policy": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/seed48/maple-policy.json",
+        "sha256": "9dc3c2f9afd0975815dc39d74648ee105d980c09d42efc74b6aec7878e0a6b21",
+        "directed_pairs": 56
+      },
+      {
+        "seed": 49,
+        "policy": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/seed49/maple-policy.json",
+        "sha256": "6812301bf74e183afd618277d04e87f709e2eb818f8793f527bcaceff712f30c",
+        "directed_pairs": 56
+      },
+      {
+        "seed": 50,
+        "policy": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/seed50/maple-policy.json",
+        "sha256": "d310dac6d1892881b1d594b22463135a76a83b39fbe15996b1658b7386d984b7",
+        "directed_pairs": 56
+      },
+      {
+        "seed": 51,
+        "policy": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/seed51/maple-policy.json",
+        "sha256": "14ad05c9350ca37ef4cf00aa21cad825a5d792693dfd853d228f0bc655ae9f39",
+        "directed_pairs": 56
+      },
+      {
+        "seed": 52,
+        "policy": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/seed52/maple-policy.json",
+        "sha256": "fa7dddd65d33f66f2a9710a9c4637eccf4b091d73c6cb20a7c08dd33df759157",
+        "directed_pairs": 56
+      },
+      {
+        "seed": 53,
+        "policy": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/seed53/maple-policy.json",
+        "sha256": "ae436925559556f8fcfb5128e4c50b8236918316ec603e6af45cbfc7021a5c74",
+        "directed_pairs": 56
+      },
+      {
+        "seed": 54,
+        "policy": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/seed54/maple-policy.json",
+        "sha256": "8336737bc3b9e3889b6f6a177fa6889f83ddf8fd04c180686438837cb86b6534",
+        "directed_pairs": 56
+      },
+      {
+        "seed": 55,
+        "policy": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/seed55/maple-policy.json",
+        "sha256": "f318640e5ffae921806a956b9cf28383018127d671b451e1f839b0658d88830c",
+        "directed_pairs": 56
+      },
+      {
+        "seed": 56,
+        "policy": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/appworld-candidate-policies/seed56/maple-policy.json",
+        "sha256": "1a26ff0504ecc0e4760b42d2543846950850581cd45bd81f1bd70fbbb2e9e66c",
+        "directed_pairs": 56
+      }
+    ]
+  },
+  "evidence": {
+    "4_method.tex.diff": {
+      "path": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/source-audit-20260929/4_method.tex.diff",
+      "sha256": "d2cab4d4c77b079f2b9bc612486a74480a7ffd5f9fcebed728f4f6bf7324b6aa"
+    },
+    "acl_latex.tex.diff": {
+      "path": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/source-audit-20260929/acl_latex.tex.diff",
+      "sha256": "8348672b6b3308f0f6ba841ee6e40d772a768717d9ce850688bcd23c578f551d"
+    },
+    "attachment_content_audit.json": {
+      "path": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/source-audit-20260929/attachment_content_audit.json",
+      "sha256": "516a906b3137d7ad25e75951159b2ee5ae765ee3f50b2cff2e79e33b5f1343da"
+    },
+    "attachment_history_retrieval.json": {
+      "path": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/source-audit-20260929/attachment_history_retrieval.json",
+      "sha256": "78a08fea7706f3ce0d904f7384c2ea29be6d5fedd483116b50437cd393e7ecb8"
+    },
+    "historical_blob_audit.json": {
+      "path": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/source-audit-20260929/historical_blob_audit.json",
+      "sha256": "6af6e61abc48803bd3ac0c6c0a48e35f26abeb9948ed0d45b48f7d29ef2ed2e2"
+    },
+    "retrieval.json": {
+      "path": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/source-audit-20260929/retrieval.json",
+      "sha256": "a07fb5c4c047f01474f08f170721bb1c69aee26c99093f06858ba8f423d6d628"
+    }
+  },
+  "notes": [
+    "No repository cloned locally; all evidence and generated policies are on inference2",
+    "No model API calibration or test execution performed during this audit",
+    "No exact original-configuration claim is justified by source availability"
+  ]
+}

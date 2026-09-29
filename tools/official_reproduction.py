@@ -30,7 +30,7 @@ def main(argv=None):
     recipe.add_argument("--job-dir",required=True)
     recipe.add_argument("--dataset-dir",required=True)
     recipe.add_argument("--model",default="gpt-4o-mini")
-    recipe.add_argument("--generation-profile",choices=("released","qwen_no_thinking"),default="released")
+    recipe.add_argument("--generation-profile",choices=("released","qwen_no_thinking","qwen_no_thinking_recover"),default="released")
     recipe.add_argument("--seed",type=int,required=True)
     recipe.add_argument("--output",required=True)
     data = sub.add_parser("prepare-infa-data")
@@ -44,6 +44,7 @@ def main(argv=None):
     check = sub.add_parser("validate-infa-checkpoint")
     check.add_argument("--source",required=True)
     check.add_argument("--checkpoint",required=True)
+    check.add_argument("--output",default="",help="Write a new machine-readable validation report separately from logs")
     bert = sub.add_parser("verify-bert")
     bert.add_argument("--directory",required=True)
     args = parser.parse_args(argv)
@@ -91,6 +92,8 @@ def main(argv=None):
         report={**provenance,"checkpoint_sha256":repro.sha256(args.checkpoint),
                 "strict_load":True,"forward_shape":list(output.shape),
                 "training_provenance_verified":False,"note":"Structural compatibility alone does not prove training"}
+    if args.action=="validate-infa-checkpoint" and args.output:
+        write_new(args.output,report)
     print(json.dumps(report,indent=2,ensure_ascii=False))
     return 0
 

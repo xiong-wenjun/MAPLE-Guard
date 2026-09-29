@@ -66,6 +66,8 @@ def add_full_baseline_args(parser, config=None):
         ("full-judge-model", str, ""),
         ("full-judge-api-key", str, ""),
         ("full-judge-max-tokens", int, 4096),
+        ("agentsafe-profile", str, "paper_components"),
+        ("agentsafe-calibration-manifest", str, ""),
         ("agentsafe-policy-file", str, ""),
         ("agentsafe-criteria-file", str, ""),
         ("agentsafe-threshold", float, None),
@@ -169,7 +171,7 @@ def baseline_run_provenance(args):
 def _component_args(args):
     prefixes = ("agentsafe_", "agentxposed_", "infa_")
     return SimpleNamespace(**{key:value for key,value in vars(args).items()
-                             if key.startswith(prefixes) or key in ("method", "agents")})
+                             if key.startswith(prefixes) or key in ("method", "agents", "embed_model")})
 
 def _factory(args):
     judge_timeout = getattr(args, "full_judge_timeout", None)

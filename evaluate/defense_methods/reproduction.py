@@ -95,9 +95,9 @@ def verify_bert(directory):
             "bert_sha256":files}
 
 def infa_recipe(source, job, dataset, model, seed, generation_profile="released"):
-    if generation_profile not in ("released", "qwen_no_thinking"):
+    if generation_profile not in ("released", "qwen_no_thinking", "qwen_no_thinking_recover"):
         raise ValueError("Unknown INFA generator profile")
-    if generation_profile == "qwen_no_thinking" and not model.lower().startswith("qwen/"):
+    if generation_profile.startswith("qwen_no_thinking") and not model.lower().startswith("qwen/"):
         raise ValueError("Qwen request adaptation requires a Qwen model")
     source, job, dataset = map(lambda p:str(Path(p).resolve()), (source, job, dataset))
     name = "native_infa_s" + str(seed)
@@ -119,7 +119,14 @@ def infa_recipe(source, job, dataset, model, seed, generation_profile="released"
         "generator_model":model,"original_generator_model":"gpt-4o-mini",
         "generation_profile":generation_profile,
         "request_overrides":({"extra_body":{"chat_template_kwargs":{"enable_thinking":False}}}
-                             if generation_profile=="qwen_no_thinking" else {}),
+                             if generation_profile.startswith("qwen_no_thinking") else {}),
+        **({"generation_recovery":{
+            "token_budgets":[1024,2048,4096,8192],"transport_attempts":3,
+            "transport_backoff_seconds":2,
+            "journal":"atomic accepted response per call ordinal and request hash",
+            "partial_responses":"rejected; never used for labels or training",
+            "provenance":"MAPLE recovery adaptation; not an original author setting"}}
+            if generation_profile=="qwen_no_thinking_recover" else {}),
         "model_substitution":model != "gpt-4o-mini",
         "original_random_seed_known":False,"reproduction_seed":seed,
         "seed_policy":"Python, NumPy and Torch: seed + generation grid index; training: seed",
