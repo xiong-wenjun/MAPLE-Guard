@@ -84,3 +84,10 @@ class RecoveryPlanTests(unittest.TestCase):
             self.assertEqual(state["status"],"completed")
             self.assertEqual(execute.call_count,2)
             self.assertNotEqual(state["completed_jobs"]["original"],state["completed_jobs"]["second"])
+
+    def test_mmlu_task_budget_uses_its_public_cli_flag(self):
+        job=self.job()
+        job["command"]=[x.replace("maple_guard.infa_memlink_eval","maple_guard.run_mmlu") for x in job["command"]]
+        new=rewrite_job(job,Path("/fresh/retry"),Path("/new/source"),{"--chat-max-tokens":"1024"})
+        args=new["command"]
+        self.assertEqual(args[args.index("--chat-max-tokens")+1],"1024")
