@@ -267,5 +267,27 @@
     "No repository cloned locally; all evidence and generated policies are on inference2",
     "No model API calibration or test execution performed during this audit",
     "No exact original-configuration claim is justified by source availability"
-  ]
+  ],
+  "adaptation_protocol_repair": {
+    "date": "2026-09-29",
+    "root_cause": "Calibration input=list16 while runtime input=string; endpoint embeddings depend on batch composition/order. Exact server kernel cause is unverified.",
+    "new_manifest": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-scalar-seed42-20260929/calibration-manifest.json",
+    "new_manifest_sha256": "2eea503b14134f2e0adf64d8262dbdb2dc5a48fc534b00a685ada11defe5ffc2",
+    "tolerance_unchanged": 1e-05,
+    "threshold_rule_unchanged": true,
+    "train_selection_and_text_hashes_unchanged": true,
+    "diagnostics": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/embedding-geometry-diagnosis-20260929"
+  },
+  "adaptation_numeric_canary": {
+    "official_author_parameter": false,
+    "manifest_path": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-scalar-canary-seed42-20260929/calibration-manifest.json",
+    "manifest_sha256": "d5e865a4bd6f46f31e32954590e5cbb513932754bf2d94b921d689753086b08c",
+    "deployment_canary_tolerance": 0.0009000793007305496,
+    "measured_maximum_cosine_error": 0.0004500396503652748,
+    "rule": "2*M capped at 0.002, fixed before independent six-request parallel verification",
+    "independent_parallel_validation_passed": true,
+    "scoring_threshold_unchanged": true,
+    "frozen_scoring_vectors_unchanged": true,
+    "weights_revision_known": false
+  }
 }

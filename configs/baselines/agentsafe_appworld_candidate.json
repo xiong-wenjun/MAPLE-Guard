@@ -86,7 +86,7 @@
   "admission": {
     "score": "minimum over all criterion cosine similarities",
     "comparison": "strictly_greater_than",
-    "theta": 0.18154229499203256,
+    "theta": 0.182565380021364,
     "theta_origin": "frozen independent CSQA train development calibration, not an original author parameter",
     "encoder": {
       "model": "Qwen/Qwen3-Embedding-8B",
@@ -95,7 +95,24 @@
       "normalization": "per-vector L2 normalization in AgentSafeFull._vector",
       "checkpoint_revision": null,
       "checkpoint_revision_requirement": "unrecovered; served ID and frozen criterion geometry validated, not weights-level identity",
-      "dimension": 4096
+      "dimension": 4096,
+      "request_protocol": {
+        "input_shape": "string",
+        "batch_size": 1,
+        "encoding_format": null,
+        "encoding_format_policy": "omitted",
+        "input_prefix": null
+      },
+      "deployment_canary": {
+        "purpose": "numeric deployment check, not the admission score threshold",
+        "tolerance": 0.0009000793007305496,
+        "rule": "2*M, pre-fixed cap 0.002, independently validated after freeze",
+        "maximum_measured_cosine_error": 0.0004500396503652748,
+        "measurement_path": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/embedding-geometry-diagnosis-20260929/numeric-canary-measurements.json",
+        "measurement_sha256": "58fc82af66b41c92465c3f5730aca3dbbfff1c7298228f6906708a2bb49d63ae",
+        "default_without_frozen_measurements": 1e-05,
+        "runtime_reports_actual_errors": true
+      }
     }
   },
   "reflection": {
@@ -137,11 +154,11 @@
     "budget_revision_reason": "Before any calibration/test scores, reduce 100+100 questions to 32+32 and add paired synthetic corruption controls to bound embedding calls.",
     "benign_records_per_split": 64,
     "corrupted_records_per_split": 64,
-    "max_embedding_requests": 17,
+    "max_embedding_requests": 259,
     "embedding_text_count": 259,
     "limitation": "64 clean messages from32 questions per split; empirical1% selection means0 clean calibration rejects, no population FPR guarantee.",
-    "manifest": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-seed42-20260929/calibration-manifest.json",
-    "manifest_sha256": "ec803c1ee79a502460874d590f56dbdaa8e3d8141e260cc32226cf0781fb0e02",
+    "manifest": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-scalar-canary-seed42-20260929/calibration-manifest.json",
+    "manifest_sha256": "d5e865a4bd6f46f31e32954590e5cbb513932754bf2d94b921d689753086b08c",
     "metrics": {
       "calibration": {
         "benign_count": 64,
@@ -201,7 +218,26 @@
       "validation_all_benign_rejected": false,
       "validation_zero_corrupted_detected": true
     },
-    "calibration_frozen_at": "2026-09-29T07:06:25.298624+00:00"
+    "calibration_frozen_at": "2026-09-29T08:18:46.887867+00:00",
+    "request_protocol": {
+      "input_shape": "string",
+      "batch_size": 1,
+      "encoding_format": null,
+      "encoding_format_policy": "omitted",
+      "input_prefix": null
+    },
+    "superseded_calibration": {
+      "manifest": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-seed42-20260929/calibration-manifest.json",
+      "manifest_sha256": "ec803c1ee79a502460874d590f56dbdaa8e3d8141e260cc32226cf0781fb0e02",
+      "threshold": 0.18154229499203256,
+      "reason": "Batch16 calibration had batch-context-dependent embeddings; zero-task smoke failed the unchanged 1e-5 geometry gate. Recomputed identical train records with exact runtime scalar payload and unchanged threshold rule."
+    },
+    "canary_manifest_previous_version": {
+      "path": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-scalar-seed42-20260929/calibration-manifest.json",
+      "sha256": "2eea503b14134f2e0adf64d8262dbdb2dc5a48fc534b00a685ada11defe5ffc2",
+      "reason": "Scalar scoring calibration preserved; numeric deployment canary separately accommodates measured concurrent batch drift."
+    },
+    "deployment_canary_frozen_at": "2026-09-29T08:31:56.994608+00:00"
   },
   "launch_requirements": [
     "User accepted disclosed adaptation identity",
@@ -214,10 +250,10 @@
     "existing_required_flags": [
       "--methods agentsafe_full",
       "--agentsafe-profile paper_v2_adapted",
-      "--agentsafe-calibration-manifest /mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-seed42-20260929/calibration-manifest.json",
+      "--agentsafe-calibration-manifest /mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-scalar-canary-seed42-20260929/calibration-manifest.json",
       "--agentsafe-policy <policy for this seed>",
-      "--agentsafe-criteria /mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-seed42-20260929/criteria.json",
-      "--agentsafe-threshold 0.18154229499203256",
+      "--agentsafe-criteria /mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-scalar-canary-seed42-20260929/criteria.json",
+      "--agentsafe-threshold 0.182565380021364",
       "--agentsafe-review-interval 1"
     ],
     "per_seed_invocation_required": true,
@@ -225,8 +261,8 @@
     "review_interval_note": "Current component default is 1; direct benchmark CLI exposes --agentsafe-review-interval 1. Matrix should record/forward it explicitly."
   },
   "frozen_assets": {
-    "criteria": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-seed42-20260929/criteria.json",
-    "policy_seed42": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-seed42-20260929/policy.json",
-    "calibration_manifest": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-seed42-20260929/calibration-manifest.json"
+    "criteria": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-scalar-canary-seed42-20260929/criteria.json",
+    "policy_seed42": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-scalar-canary-seed42-20260929/policy.json",
+    "calibration_manifest": "/mnt/public/data/wj/baseline-reproduction-20260929/agentsafe/calibration-csqa32-scalar-canary-seed42-20260929/calibration-manifest.json"
   }
 }

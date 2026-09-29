@@ -31,6 +31,7 @@ class AgentSafeFull:
         if self.profile not in ("paper_components", "paper_v2_adapted"):
             raise AgentSafeConfigError("Unknown AgentSafe reproduction profile")
         self.calibration_manifest_sha256 = None
+        self.deployment_canary = None
         try:
             with open(args.agentsafe_policy_file, encoding="utf-8") as handle:
                 self.policy = self._decode(handle.read())
@@ -86,6 +87,45 @@ class AgentSafeFull:
             "permission_rule": "message_level <= pair_based_recipient_clearance",
             "shared_admission": "recipient permission checked at actual read or route",
             "review_interval": self.review_interval}
+        if self.deployment_canary is not None:
+            self.provenance["deployment_canary"] = self.deployment_canary
+
+    def _calibration_numeric_tolerance(self, manifest):
+        """Validate a measured deployment canary; this never changes scoring."""
+        encoder = manifest.get("encoder", {})
+        tolerance = encoder.get("criterion_geometry_cosine_tolerance", 1e-5)
+        if type(tolerance) not in (int, float) or not math.isfinite(tolerance) or not 0 < tolerance <= .002:
+            raise ValueError("invalid finite deployment canary tolerance")
+        canary = encoder.get("numeric_canary")
+        if canary is None:
+            if tolerance != 1e-5:
+                raise ValueError("nondefault canary tolerance requires frozen measurements")
+            return tolerance, None
+        if not isinstance(canary, dict) or canary.get("purpose") != "embedding_deployment_numeric_canary":
+            raise ValueError("unknown deployment canary configuration")
+        with open(canary["measurement_path"], "rb") as handle:
+            raw = handle.read()
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest != canary.get("measurement_sha256"):
+            raise ValueError("deployment canary measurements changed")
+        evidence = self._decode(raw.decode("utf-8"))
+        maximum = evidence.get("maximum_cosine_error")
+        if type(maximum) not in (int, float) or not math.isfinite(maximum) or maximum <= 0:
+            raise ValueError("invalid measured deployment canary error")
+        records = evidence.get("records")
+        if (not isinstance(records, list) or not records
+                or evidence.get("measurement_count") != len(records)
+                or {r.get("criterion") for r in records} != set(range(len(self.criteria)))):
+            raise ValueError("insufficient deployment canary measurements")
+        errors = [r.get("cosine_error_to_new_frozen") for r in records]
+        if (any(type(x) not in (int, float) or not math.isfinite(x) or x < 0 for x in errors)
+                or max(errors) != maximum
+                or evidence.get("tolerance_rule") != "2*M"
+                or evidence.get("hard_cap") != .002 or evidence.get("eligible") is not True
+                or tolerance != 2 * maximum or evidence.get("selected_tolerance") != tolerance
+                or evidence.get("reference_criterion_vectors_sha256") != encoder.get("criterion_vectors_file_sha256")):
+            raise ValueError("deployment canary does not match its frozen numeric rule")
+        return tolerance, digest
 
     def _verify_calibration(self, args):
         """Bind the opt-in profile to independent calibration without altering legacy runs."""
@@ -107,10 +147,12 @@ class AgentSafeFull:
                 raise ValueError("calibration uses a different scoring rule")
             if manifest.get("encoder", {}).get("model") != getattr(args, "embed_model", None):
                 raise ValueError("embedding model differs from frozen calibration")
+            tolerance, measurement_sha = self._calibration_numeric_tolerance(manifest)
             expected = manifest.get("criterion_vectors")
             if not isinstance(expected, list) or len(expected) != len(self.criterion_vectors):
                 raise ValueError("calibration criterion vectors missing or wrong size")
             frozen_vectors = []
+            cosine_errors = []
             for actual, vector in zip(self.criterion_vectors, expected):
                 if not isinstance(vector, list) or len(actual) != len(vector):
                     raise ValueError("calibration embedding dimension changed")
@@ -122,11 +164,19 @@ class AgentSafeFull:
                 frozen = [b / norm for b in vector]
                 frozen_vectors.append(frozen)
                 cosine = math.fsum(a * b for a,b in zip(actual, frozen))
-                if abs(1.0 - cosine) > 1e-5:
-                    raise ValueError("live criterion embedding geometry differs from calibration")
+                error = abs(1.0 - cosine)
+                cosine_errors.append(error)
+                if error > tolerance:
+                    raise ValueError(f"live criterion embedding geometry differs from calibration: error={error} tolerance={tolerance}")
             # Match calibration arithmetic and retain stable criterion geometry;
             # live embeddings above validate the endpoint rather than redefining it.
             self.criterion_vectors = frozen_vectors
+            self.deployment_canary = {"tolerance": tolerance,
+                "criterion_cosine_errors": cosine_errors,
+                "maximum_cosine_error": max(cosine_errors),
+                "measurement_sha256": measurement_sha,
+                "purpose": "deployment identity numeric check; frozen scoring vectors unchanged",
+                "embedding_asset_revision": manifest.get("encoder", {}).get("asset_revision")}
             self.calibration_manifest_sha256 = hashlib.sha256(raw).hexdigest()
         except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
             raise AgentSafeConfigError(f"Invalid AgentSafe calibration: {exc}") from exc

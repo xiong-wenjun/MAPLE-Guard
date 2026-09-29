@@ -1,6 +1,8 @@
 """Regression checks for bounded, independently calibrated AgentSafe adaptation."""
 import hashlib
 import importlib.util
+import io
+from unittest.mock import patch
 import json
 import math
 from pathlib import Path
@@ -81,6 +83,40 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual([len(x) for x in calls], [4, 4, 1])
         self.assertEqual(result[-1], [1., 8.])
 
+    def test_scalar_transport_matches_runtime_payload_and_records_protocol(self):
+        tool = load_tool(self)
+        calls = []
+        class Response(io.StringIO):
+            status = 200
+        def fake_urlopen(request, timeout):
+            body = None if request.data is None else json.loads(request.data)
+            calls.append(body)
+            data = {"data": [{"id": "test-encoder"}]} if body is None else {
+                "data": [{"index": 0, "embedding": [1., 2.]}]}
+            return Response(json.dumps(data))
+        with tempfile.TemporaryDirectory() as folder, patch.object(tool.urllib.request, "urlopen", fake_urlopen):
+            embed, identity = tool.remote_transport(
+                {"model": "test-encoder", "base_url": "https://example.invalid/v1"},
+                Path(folder)/"calls.jsonl", 10, input_mode="scalar", batch_size=1)
+            self.assertEqual(embed(["unchanged criterion"]), [[1., 2.]])
+            self.assertEqual(calls, [None, {"model": "test-encoder", "input": "unchanged criterion"}])
+            protocol = identity["request_protocol"]
+            self.assertEqual(protocol, {"input_shape": "string", "batch_size": 1,
+                "encoding_format": None, "encoding_format_policy": "omitted", "input_prefix": None})
+            logged = json.loads((Path(folder)/"calls.jsonl").read_text())
+            self.assertEqual(logged["request_protocol"], protocol)
+            with self.assertRaises(ValueError):
+                embed(["first", "second"])
+            self.assertEqual(len(calls), 2)
+
+    def test_scalar_transport_rejects_batched_configuration_before_network(self):
+        tool = load_tool(self)
+        with patch.object(tool.urllib.request, "urlopen") as network:
+            with self.assertRaises(ValueError):
+                tool.remote_transport({"model": "test-encoder", "base_url": "https://example.invalid"},
+                    "/unused.jsonl", 10, input_mode="scalar", batch_size=16)
+            network.assert_not_called()
+
     def test_heldout_integrity_is_hash_only_and_rejects_changed_files(self):
         tool = load_tool(self)
         with tempfile.TemporaryDirectory() as folder:
@@ -120,6 +156,78 @@ class AdaptedProfileTests(unittest.TestCase):
         self.args = SimpleNamespace(agentsafe_policy_file=str(self.policy), agentsafe_criteria_file=str(self.criteria),
             agentsafe_threshold=.25, agentsafe_review_interval=1, agentsafe_profile="paper_v2_adapted",
             agentsafe_calibration_manifest=str(self.manifest), embed_model="test-encoder")
+
+    def test_full_runtime_criterion_transport_matches_scalar_calibration_payload(self):
+        from evaluate.defense_methods.full_runtime import _factory
+        self.args.method = "agentsafe_full"
+        self.args.agents = 2
+        self.args.embed_base_url = "https://example.invalid/v1"
+        self.args.full_judge_base_url = "https://example.invalid/v1"
+        self.args.full_judge_model = "unused-judge"
+        with patch("requests.post") as post:
+            post.return_value.__enter__.return_value.json.return_value = {
+                "data": [{"index": 0, "embedding": [1., 0.]}]}
+            guard = _factory(self.args)
+        self.assertEqual(guard.profile, "paper_v2_adapted")
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_args.kwargs["json"],
+            {"model": "test-encoder", "input": "criterion"})
+
+    def freeze_numeric_canary(self, maximum=.0004):
+        evidence = self.manifest.with_name("canary-evidence.json")
+        report = {"maximum_cosine_error": maximum, "selected_tolerance": 2*maximum,
+            "tolerance_rule": "2*M", "hard_cap": .002, "eligible": True,
+            "measurement_count": 1, "records": [{"criterion": 0, "cosine_error_to_new_frozen": maximum}],
+            "reference_criterion_vectors_sha256": "a"*64}
+        evidence.write_text(json.dumps(report))
+        self.freeze["encoder"].update(criterion_geometry_cosine_tolerance=2*maximum,
+            criterion_vectors_file_sha256="a"*64, numeric_canary={
+                "purpose": "embedding_deployment_numeric_canary",
+                "measurement_path": str(evidence),
+                "measurement_sha256": hashlib.sha256(evidence.read_bytes()).hexdigest()})
+        self.manifest.write_text(json.dumps(self.freeze))
+
+    def test_measured_canary_accepts_numeric_noise_without_changing_scoring(self):
+        exact = self.Guard(self.args, self.judge, lambda t: [1., 0.] if t == "criterion" else [.8, .6])
+        self.freeze_numeric_canary()
+        cosine = 1-.0006
+        noisy = self.Guard(self.args, self.judge,
+            lambda t: [cosine, math.sqrt(1-cosine*cosine)] if t == "criterion" else [.8, .6])
+        self.assertEqual(exact.criterion_vectors, noisy.criterion_vectors)
+        self.assertEqual(exact._criterion_scores("message"), noisy._criterion_scores("message"))
+        self.assertEqual(exact.threshold, noisy.threshold)
+        self.assertAlmostEqual(noisy.provenance["deployment_canary"]["criterion_cosine_errors"][0], .0006)
+        self.assertEqual(noisy.provenance["deployment_canary"]["tolerance"], .0008)
+
+    def test_measured_canary_rejects_above_frozen_tolerance_and_unknown_tolerance(self):
+        self.freeze_numeric_canary()
+        cosine = 1-.0009
+        with self.assertRaises(ValueError):
+            self.Guard(self.args, self.judge, lambda t: [cosine, math.sqrt(1-cosine*cosine)])
+        del self.freeze["encoder"]["numeric_canary"]
+        self.manifest.write_text(json.dumps(self.freeze))
+        with self.assertRaises(ValueError):
+            self.Guard(self.args, self.judge, lambda t: [1., 0.])
+
+    def test_measured_canary_rejects_nonfinite_unbounded_or_rule_changed_tolerance(self):
+        self.freeze_numeric_canary()
+        for invalid in [float("nan"), float("inf"), True, -.001, .0021, .0009]:
+            with self.subTest(tolerance=invalid):
+                self.freeze["encoder"]["criterion_geometry_cosine_tolerance"] = invalid
+                self.manifest.write_text(json.dumps(self.freeze))
+                with self.assertRaises(ValueError):
+                    self.Guard(self.args, self.judge, lambda t: [1., 0.])
+
+    def test_measured_canary_rejects_changed_measurement_artifact(self):
+        self.freeze_numeric_canary()
+        Path(self.freeze["encoder"]["numeric_canary"]["measurement_path"]).write_text("{}")
+        with self.assertRaises(ValueError):
+            self.Guard(self.args, self.judge, lambda t: [1., 0.])
+
+    def test_legacy_calibration_keeps_strict_numeric_gate(self):
+        cosine = 1-.00002
+        with self.assertRaises(ValueError):
+            self.Guard(self.args, self.judge, lambda t: [cosine, math.sqrt(1-cosine*cosine)])
 
     def test_adapted_profile_requires_frozen_calibration_and_model_identity(self):
         self.args.embed_model = "different-encoder"
