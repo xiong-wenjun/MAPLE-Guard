@@ -30,7 +30,7 @@ def main(argv=None):
     recipe.add_argument("--job-dir",required=True)
     recipe.add_argument("--dataset-dir",required=True)
     recipe.add_argument("--model",default="gpt-4o-mini")
-    recipe.add_argument("--generation-profile",choices=("released","qwen_no_thinking","qwen_no_thinking_recover"),default="released")
+    recipe.add_argument("--generation-profile",choices=("released","qwen_no_thinking","qwen_no_thinking_recover","qwen_no_thinking_released_budget"),default="released")
     recipe.add_argument("--seed",type=int,required=True)
     recipe.add_argument("--output",required=True)
     data = sub.add_parser("prepare-infa-data")

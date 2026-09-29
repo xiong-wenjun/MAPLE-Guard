@@ -63,7 +63,7 @@ python tools/official_reproduction.py agentsafe-relations \
 
 新服务器可运行 `official_reproduction.py prepare-infa-data` 重建同样审计；需要 pandas 和 pyarrow。本服务器 pyarrow 安装在独立 `/mnt/public/data/wj/baseline-training-runtime`，使用 PYTHONPATH，不修改已有实验依赖。
 
-执行器 `tools/run_infa_release_stage.py` 的 stage 顺序是 prepare → generate（grid-index 0..19）→ merge → embed → train。命令清单由 `official_reproduction.py infa-recipe` 生成，原模型和 Qwen 替换版分开保存。原生 evaluate/utils/train 模块在专用进程内重新导入，防止误调用 MAPLE 同名包。执行器拒绝修改后的 recipe、源码、模型资产、测试文件或训练输入，API 密钥仅注入环境。released 配置的 API 审计不修改请求参数；截断、空回复或 API 错误会阻止训练。
+执行器 `tools/run_infa_release_stage.py` 的 stage 顺序是 prepare → generate（grid-index 0..19）→ merge → embed → train。命令清单由 `official_reproduction.py infa-recipe` 生成，原模型和 Qwen 替换版分开保存。原生 evaluate/utils/train 模块在专用进程内重新导入，防止误调用 MAPLE 同名包。执行器拒绝修改后的 recipe、源码、模型资产、测试文件或训练输入，API 密钥仅注入环境。历史 `released` 配置的 API 审计不修改请求参数，但附加了拒绝截断与空回复的门禁；这比官方发布代码的正文消费规则更严格。该历史行为保留，新增的官方预算配置见下文。
 
 ```bash
 # 下列路径均是服务器路径。prepare 只允许新工作目录。
@@ -133,3 +133,22 @@ Use the separate `qwen_no_thinking_recover` recipe in a fresh workspace. It leav
 Run `tools/run_infa_training_pipeline.py --help` for the controller arguments. Run it from a frozen repository snapshot. Credentials, response journals, checkpoints, calibration data and all benchmark outputs remain under the authorized server directory outside Git. The selected checkpoint is independently retrained; it is not an author checkpoint. Qwen generation and token-budget recovery must be disclosed when reporting this baseline.
 
 Validation includes restart parity using the actual pinned upstream graph generator and synthetic test responses: interrupt after the 36th request, retain 39 complete concurrent replies, replay them and make 25 new calls. The reconstructed two-dialogue graph, replies and per-turn infection labels exactly match the uninterrupted fixture. This is an integration test, not training or benchmark data.
+
+
+## Qwen 官方预算配置：训练生成与评测分开处理
+
+`qwen_no_thinking_released_budget` 使用官方生成器的固定 `max_tokens=1024` 和正文消费方式。证据是固定版本的 [MAS/agents.py:62–72](https://github.com/yjzscode/INFA-Guard/blob/80b1156cb22d576d9149046c36c540c728a43dde/MAS/agents.py#L62-L72)：上游直接返回 `choices[0].message.content`，不检查 `finish_reason`。此前额外要求所有回复以 `stop` 结束、并把预算升到 8192，是 MAPLE 完整性恢复适配，不能当成原作者的生成协议。
+
+新配置只用于训练生成：
+
+- 请求预算始终为 1024，正文非空且结束原因为 `stop` 或 `length` 时，原样交给官方生成器；不续写、不补全、不改提示或答案标签。`length` 只表示消耗了官方预算，不被描述为自然结束的完整答案。
+- 空正文、其他结束原因及最终 API 错误仍失败。连接、超时、429/服务端错误保持最多 3 次 transport 尝试；没有 token 阶梯。
+- 原子 journal 保留整个 API response、原始 `finish_reason`、请求/回复哈希与 accepted token budget；阶段报告增加 `accepted_finish_reasons` 次数。64/1280 次回复、四轮八节点、800 条训练对话、50 epochs、源码/数据/权重校验保持。
+- Qwen 替换 GPT-4o-mini、关闭思考和缓存/网络恢复仍需披露。旧 `qwen_no_thinking_recover` 的拒绝截断及 1024→8192 行为保持，旧运行与冻结源码不修改。
+- **评测仍使用 strict 协议拒绝截断。** 接受训练生成的官方封顶正文不降低 Qwen/Gemma smoke 或 200 题评测的成功门槛。
+
+用 `official_reproduction.py infa-recipe --generation-profile qwen_no_thinking_released_budget` 为全新工作目录准备 recipe，正常执行 prepare，再由控制器运行。不得把旧工作目录的完成 marker 改名作为新配置结果。
+
+如复用旧 journal，仅允许从 ordinal 0 开始连续的非空 `stop`、`accepted_max_tokens=1024` 前缀；到第一个缺失、扩容或其他结束原因即停止。后续 1024 回复也不能直接复制，因为它们可能依赖此前不同的上下文。`tools.infa_generation_recovery.import_released_prefix(source,destination)` 要求全新目标目录，保存来源目录、每个原文件 SHA-256、整个前缀 SHA-256，以及停止原因；重放时仍逐条核对新请求哈希。来源元数据保存在 journal 的 `import-provenance/provenance.json` 子目录，阶段完整性报告记录其哈希。
+
+只读诊断证据：旧运行 grid01 ordinal66 的请求 SHA-256 为 `d6ee6b447139969cad43d27549ce4638be041384ec0091230a508c0826eb73d0`，对应第三条对话首轮攻击者 agent2，提示要求为指定错误选项辩护。1024、2048、4096 阶梯均返回 `length`；截断正文未保存，不能断言其具体内容。grid00 ordinal71 在 1024 返回 `length`，2048 重试却以 126 个 completion tokens 返回 `stop`，表明再次请求不能假定逐 token 确定。诊断时可复用前缀为协议 64 条、grid00 71 条、grid01 66 条；实际导入必须重新核验当时磁盘内容。
