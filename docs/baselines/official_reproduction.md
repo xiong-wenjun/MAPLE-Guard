@@ -116,3 +116,20 @@ python tools/verify_guardian_release.py \
 修复后的方法先通过源码/资产检查和组件对照，再进行 Qwen/Gemma 各两题完整协议检查；只有生成、检测、过滤与记忆事件真实参与且无 API/依赖错误，才进入新的正式 200 题、15 seeds × 4 拓扑矩阵。运行目录、模型名、协议、源码版本必须与旧适配实验区分。
 
 主表写清方法身份与实现来源。AgentSafe paper-components、Qwen 重训 INFA、GUARDIAN released detector in MAPLE 均应在组件表列出宿主改动；原公开框架的 native 复现实验作为附录核验，不与当前 AppWorld proxy 成绩混成同一口径。不得把协议检查题数、单元测试或随机初始化模型当正式结果。
+
+
+## Declared Qwen recovery and automatic test handoff (2026-09-29)
+
+The first 1024-token Qwen generation grid failed after 191 complete replies and one truncated reply; upstream saves its dataset only after all 40 dialogues finish. Those historical replies were not retained and cannot be reconstructed or counted as training data.
+
+Use the separate `qwen_no_thinking_recover` recipe in a fresh workspace. It leaves the pinned official source, graph sampler, infection labels, four turns, 800-dialogue grid, MiniLM encoder and 50-epoch optimizer recipe unchanged. The explicitly non-author runtime adaptation adds:
+
+- Atomic per-request records for accepted nonempty `stop` replies, indexed by deterministic invocation ordinal and original request hash; restart replays completed requests and rejects prompt/cache drift.
+- Token budgets 1024, 2048, 4096, 8192, used in that order only while the same request remains incomplete; no prompt rewrite and no incomplete reply admitted to training.
+- At most three wrapper attempts on connection/timeout/429/server errors per token budget; other API errors fail immediately.
+- A complete 64-response journal for two protocol dialogues or 1280 responses for each 40-dialogue training grid, with an aggregate integrity hash.
+- A bounded controller: two protocol dialogues, 20 grids, merge, feature generation, 50 full epochs, native checkpoint validation, two-backbone smoke checks, then AppWorld-200 evaluations. Failed prerequisites block subsequent stages.
+
+Run `tools/run_infa_training_pipeline.py --help` for the controller arguments. Run it from a frozen repository snapshot. Credentials, response journals, checkpoints, calibration data and all benchmark outputs remain under the authorized server directory outside Git. The selected checkpoint is independently retrained; it is not an author checkpoint. Qwen generation and token-budget recovery must be disclosed when reporting this baseline.
+
+Validation includes restart parity using the actual pinned upstream graph generator and synthetic test responses: interrupt after the 36th request, retain 39 complete concurrent replies, replay them and make 25 new calls. The reconstructed two-dialogue graph, replies and per-turn infection labels exactly match the uninterrupted fixture. This is an integration test, not training or benchmark data.

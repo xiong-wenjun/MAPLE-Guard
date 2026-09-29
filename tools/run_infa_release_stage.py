@@ -18,10 +18,15 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from evaluate.defense_methods import reproduction as r
 
-def install_api_audit(path, request_overrides=None):
+def install_api_audit(path, request_overrides=None, recovery_policy=None, cache_dir=None):
     """Observe the upstream request unchanged and fail on incomplete generations."""
     from openai.resources.chat.completions import AsyncCompletions
     original = AsyncCompletions.create
+    if recovery_policy:
+        from tools.infa_generation_recovery import make_audited_create
+        AsyncCompletions.create = make_audited_create(
+            original, path, request_overrides, recovery_policy, cache_dir)
+        return
     overrides = request_overrides or {}
     async def audited(self, *args, **kwargs):
         if set(kwargs) & set(overrides):
@@ -155,6 +160,10 @@ def run_stage(recipe, stage, grid_index, heldout, services="", service="", proto
     logdir=job/"stage-results";logdir.mkdir(exist_ok=True)
     marker=logdir/(label+".json")
     if marker.exists():raise FileExistsError("Stage has already completed")
+    # A resumed grid must never have two writers, even if separate controllers race.
+    import fcntl
+    stage_lock=(logdir/(label+".lock")).open("a")
+    fcntl.flock(stage_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     # Each invocation runs in its own process: global RNG/cwd changes cannot affect evaluations.
     import numpy as np
     import torch
@@ -163,10 +172,11 @@ def run_stage(recipe, stage, grid_index, heldout, services="", service="", proto
     before=set(destination.glob("*.json")) if destination.exists() else set()
     old=Path.cwd()
     if stage=="generate":
-        install_api_audit(logdir/(label+"-api.jsonl"), recipe["request_overrides"])
+        install_api_audit(logdir/(label+"-api.jsonl"), recipe["request_overrides"],
+                          recipe.get("generation_recovery"), logdir/(label+"-responses"))
     try:
         os.chdir(job);prepare_native_imports(job);sys.argv=argv
-        with (logdir/(label+".log")).open("x") as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
+        with (logdir/(label+".log")).open("a" if stage=="generate" and recipe.get("generation_recovery") else "x") as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
             runpy.run_path(str(job/argv[0]),run_name="__main__")
     finally:
         os.chdir(old)
@@ -188,7 +198,9 @@ def run_stage(recipe, stage, grid_index, heldout, services="", service="", proto
             "source_revision":recipe["source_revision"],"seed":seed,
             "generator_model":recipe["generator_model"],"model_substitution":recipe["model_substitution"],
             "generation_profile":recipe["generation_profile"],"request_overrides":recipe["request_overrides"],
-            "author_checkpoint":False}
+            "author_checkpoint":False,
+            "generation_recovery":recipe.get("generation_recovery"),
+            "recovery_journal":str(logdir/(label+"-responses")) if stage=="generate" and recipe.get("generation_recovery") else None}
     if stage=="generate":
         after=set(destination.glob("*.json"))-before
         if len(after)!=1:raise ValueError("Expected exactly one generated graph file")
@@ -196,6 +208,9 @@ def run_stage(recipe, stage, grid_index, heldout, services="", service="", proto
         report["validation"]=r.validate_infa_dialogues(json.loads(output.read_text()),
                     r.heldout_questions(heldout),2 if protocol_check else 40)
         report["output"]=str(output);report["sha256"]=r.sha256(output)
+        if recipe.get("generation_recovery"):
+            from tools.infa_generation_recovery import summarize_journal
+            report["generation_integrity"]=summarize_journal(report["recovery_journal"],(2 if protocol_check else 40)*8*4)
     elif stage in ("merge","embed"):
         output=(formal/"dataset.json") if stage=="merge" else Path(recipe["training"]["argv"][recipe["training"]["argv"].index("--dataset_path")+1])
         report["output"]=str(output);report["sha256"]=r.sha256(output)
@@ -205,7 +220,8 @@ def run_stage(recipe, stage, grid_index, heldout, services="", service="", proto
         report["checkpoints"]={str(p):r.sha256(p) for p in weights}
         report["evaluation_ready"]=False
         report["next_gate"]="strict native checkpoint load and held-out protocol tasks"
-    marker.write_text(json.dumps(report,indent=2)+"\n")
+    from tools.infa_generation_recovery import atomic_json
+    atomic_json(marker,report)
     return report
 
 def main(argv=None):

@@ -76,7 +76,11 @@ def arguments():
     p.add_argument("--agentsafe-policy",default="")
     p.add_argument("--agentsafe-criteria",default="")
     p.add_argument("--agentsafe-threshold",type=float)
+    p.add_argument("--agentsafe-profile",choices=("paper_components","paper_v2_adapted"),default="paper_components")
+    p.add_argument("--agentsafe-calibration-manifest",default="")
+    p.add_argument("--agentsafe-review-interval",type=int,default=1)
     p.add_argument("--infa-checkpoint",default="")
+    p.add_argument("--infa-source",default="")
     p.add_argument("--minilm-model",default="")
     p.add_argument("--guardian-source",default="")
     p.add_argument("--guardian-bert-dir",default="")
@@ -92,12 +96,18 @@ def extras(args, method, run_id):
     if method=="agentsafe_full":
         if not (args.agentsafe_policy and args.agentsafe_criteria and args.agentsafe_threshold is not None):
             return [],"AgentSafe policy, criteria and independently frozen threshold are required"
+        profile=getattr(args,"agentsafe_profile","paper_components")
+        calibration=getattr(args,"agentsafe_calibration_manifest","")
+        if profile=="paper_v2_adapted" and (not calibration or not Path(calibration).is_file()):
+            return [],"AgentSafe adaptation requires a frozen independent calibration manifest"
         return ["--agentsafe-policy-file",args.agentsafe_policy,"--agentsafe-criteria-file",args.agentsafe_criteria,
-                "--agentsafe-threshold",str(args.agentsafe_threshold)],None
+                "--agentsafe-threshold",str(args.agentsafe_threshold),
+                "--agentsafe-profile",profile,"--agentsafe-calibration-manifest",calibration,
+                "--agentsafe-review-interval",str(getattr(args,"agentsafe_review_interval",1))],None
     if method=="infa_guard_full":
         if not args.infa_checkpoint:
             return [],"Native dual-head INFA checkpoint missing; supplied G-Safeguard weights retained separately"
-        return ["--infa-code-dir",str(refs/"INFA-Guard"),"--infa-checkpoint",args.infa_checkpoint,
+        return ["--infa-code-dir",getattr(args,"infa_source","") or str(refs/"INFA-Guard"),"--infa-checkpoint",args.infa_checkpoint,
                 "--infa-embedding-model",args.minilm_model,"--infa-protocol","released",
                 "--infa-detector-mode","profile","--infa-correction-transport","functional"],None
     if method.startswith("agentxposed_full_"):
@@ -156,7 +166,22 @@ def build_job(args, method, seed, services, topology="star", config_snapshot=Non
                 "--memory-topology","brokered-shared","--top-k-memory","3","--disable-chat-thinking",
                 "--asr-metric","target_hit","--chat-max-tokens","512"]
     if args.phase=="smoke": cmd+=["--warmup-tasks","0","--malicious-activation-rate","0.25"]
-    return {"run_id":run_id,"method":method,"table_role":"main" if method in MAIN else ("identity_audit" if method in IDENTITY_AUDIT else "mechanism"),
+    baseline_metadata={}
+    if method=="agentsafe_full":
+        def asset_digest(value):
+            return hashlib.sha256(Path(value).read_bytes()).hexdigest() if value and Path(value).is_file() else None
+        calibration=getattr(args,"agentsafe_calibration_manifest","")
+        baseline_metadata={"baseline_configuration":{
+            "profile":getattr(args,"agentsafe_profile","paper_components"),
+            "reporting_label":"AgentSafe (full-component adaptation)",
+            "official_configuration_recovered":False,
+            "calibration_manifest":calibration,
+            "calibration_manifest_sha256":asset_digest(calibration),
+            "criteria_sha256":asset_digest(args.agentsafe_criteria),
+            "policy_sha256":asset_digest(args.agentsafe_policy),
+            "admission_threshold":args.agentsafe_threshold,
+            "review_interval":getattr(args,"agentsafe_review_interval",1)}}
+    return {**baseline_metadata,"run_id":run_id,"method":method,"table_role":"main" if method in MAIN else ("identity_audit" if method in IDENTITY_AUDIT else "mechanism"),
             "seed":seed,"topology":topology,"phase":args.phase,"profile":args.profile,"directory":str(run_dir),
             # A lookup hint only: reuse still requires matching dataset, algorithm flags and assets.
             "legacy_run_id":legacy_run_id if topology=="star" else None,"config_snapshot":config_snapshot,
