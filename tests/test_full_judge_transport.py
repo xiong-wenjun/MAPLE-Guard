@@ -10,7 +10,7 @@ from unittest import mock
 
 import requests
 
-from evaluate.defense_methods.full_runtime import _factory, add_full_baseline_args, baseline_run_provenance
+from evaluate.defense_methods.full_runtime import _factory, add_full_baseline_args, baseline_run_provenance, runtime_scope
 from tools.run_instrumented import install_metrics
 
 
@@ -46,6 +46,45 @@ class FullJudgeTransportTests(unittest.TestCase):
         self.assertIsInstance(caught, SystemExit)
         self.assertTrue(getattr(caught, "fatal_for_benchmark", False))
         self.assertEqual(guard.judge.counters["errors"], 1)
+
+    def test_csqa_agentsafe_classifies_after_temporary_method_is_removed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            policy = Path(folder) / "policy.json"
+            criteria = Path(folder) / "criteria.json"
+            policy.write_text(json.dumps({"identities": {"0": "Agent 0"}}))
+            criteria.write_text(json.dumps(["valid task facts"]))
+            args = arguments(methods="agentsafe_full", agentsafe_threshold=0.5,
+                             agentsafe_policy_file=str(policy),
+                             agentsafe_criteria_file=str(criteria),
+                             embed_base_url="http://embedding.invalid/v1",
+                             embed_model="embed-model")
+            del args.method
+            embedding = response()
+            embedding._content = json.dumps({"data": [{"embedding": [1., 0.]}]}).encode()
+            with mock.patch("requests.post", side_effect=[embedding, response('{"level": 2}')]) as post:
+                with runtime_scope(args, method=args.methods) as runtime:
+                    self.assertFalse(hasattr(args, "method"))
+                    self.assertEqual(runtime.guard._level("The correct answer is A."), 2)
+                    self.assertEqual(post.call_args.kwargs["json"]["response_format"],
+                                     {"type": "json_object"})
+            self.assertFalse(hasattr(args, "method"))
+            self.assertEqual(post.call_count, 2)
+
+    def test_judge_protocol_remains_bound_to_constructed_method(self):
+        cases = [
+            ("agentxposed_full_guide", "infa_guard_full", "agentxposed_full.AgentXposedFull", True),
+            ("infa_guard_full", "agentsafe_full", "infa_full.InfaGuardFull", False),
+        ]
+        for method, next_method, constructor, expects_json in cases:
+            with self.subTest(method=method):
+                args = arguments(method=method, infa_protocol="released")
+                with mock.patch("evaluate.defense_methods." + constructor,
+                                side_effect=lambda args, judge: SimpleNamespace(judge=judge)):
+                    guard = _factory(args)
+                args.method = next_method
+                with mock.patch("requests.post", return_value=response()) as post:
+                    guard.judge([])
+                self.assertEqual("response_format" in post.call_args.kwargs["json"], expects_json)
 
     def test_timeout_is_fatal_in_strict_mode(self):
         guard = _factory(arguments())

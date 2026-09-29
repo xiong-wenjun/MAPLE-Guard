@@ -182,6 +182,8 @@ def _component_args(args):
                              if key.startswith(prefixes) or key in ("method", "agents", "embed_model")})
 
 def _factory(args):
+    # runtime_scope restores the caller namespace before deferred judge calls.
+    method = args.method
     judge_timeout = getattr(args, "full_judge_timeout", None)
     if judge_timeout is None:
         # AgentXposed's unpinned openai>=0.27.0 requirement uses legacy calls.
@@ -207,7 +209,7 @@ def _factory(args):
                    "response_format":{"type":"json_object"}}
         if response_format is None:
             payload.pop("response_format", None)
-        if args.method == "infa_guard_full" and getattr(args, "infa_protocol", "released") == "released":
+        if method == "infa_guard_full" and getattr(args, "infa_protocol", "released") == "released":
             payload.pop("response_format", None)
         if getattr(args, "disable_chat_thinking", False):
             payload["chat_template_kwargs"] = {"enable_thinking":False}
