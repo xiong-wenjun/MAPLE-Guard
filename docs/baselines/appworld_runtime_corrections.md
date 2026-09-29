@@ -23,3 +23,14 @@ Keep failed artifacts. Use a new code snapshot, output directory, memory databas
 The protocol remains AppWorld-derived action selection, not native AppWorld execution. A single star/seed42 run is still a pilot, not the original multi-topology repeated experiment.
 
 Validation after all corrections: 243 tests passed. Logs: /mnt/public/data/wj/maple-strict-results/appworld-20260929-feedback-fix-tests.log.
+
+## Released AgentXposed timeout correction
+
+A subsequent strict Guide smoke stopped at a Reid analyze-response request after 120 seconds. The source uses legacy OpenAI ChatCompletion.create without an explicit request timeout and declares openai>=0.27.0. The official openai-python v0.27.0 api_requestor defines TIMEOUT_SECS=600 and uses it when request_timeout is absent:
+https://github.com/openai/openai-python/blob/v0.27.0/openai/api_requestor.py
+
+The adapter now defaults to600 seconds only for released AgentXposed profiles; other profiles retain120 seconds. An explicit positive, finite full-judge-timeout can override this. Effective timeout is recorded in provenance. The historical installed upstream SDK version remains unknown; this correction does not establish the exact cause or output of the timed-out request, whose dynamic text was not persisted.
+
+The task/memory engine, prompts, temperatures, token budgets, and strict error policy are unchanged. Healthy7ff74c7 runs remain intact; Guide/Kick receive fresh runs from the transport-correction snapshot. Never combine their failed older traces into the new runs.
+
+Full verification after this correction:248 tests passed.

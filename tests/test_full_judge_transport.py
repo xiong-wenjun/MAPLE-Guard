@@ -1,3 +1,4 @@
+import argparse
 import io
 import json
 import os
@@ -9,7 +10,7 @@ from unittest import mock
 
 import requests
 
-from evaluate.defense_methods.full_runtime import _factory
+from evaluate.defense_methods.full_runtime import _factory, add_full_baseline_args, baseline_run_provenance
 from tools.run_instrumented import install_metrics
 
 
@@ -90,6 +91,57 @@ class FullJudgeTransportTests(unittest.TestCase):
             self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": False})
             self.assertNotIn("response_format", payload)
             self.assertEqual(send.call_args.kwargs["timeout"], 120)
+
+    def test_released_agentxposed_uses_600_second_timeout(self):
+        for protocol in ("released_minimal_fix", "released_unmodified"):
+            with self.subTest(protocol=protocol), \
+                 mock.patch("evaluate.defense_methods.agentxposed_full.AgentXposedFull",
+                            side_effect=lambda args, judge: SimpleNamespace(judge=judge)), \
+                 mock.patch("requests.post", return_value=response()) as post:
+                guard = _factory(arguments(agentxposed_protocol=protocol))
+                guard.judge([], temperature=0.5, response_format=None)
+                self.assertEqual(post.call_args.kwargs["timeout"], 600)
+                self.assertEqual(guard.judge.timeout_seconds, 600)
+                payload = post.call_args.kwargs["json"]
+                self.assertEqual(payload["max_tokens"], 4096)
+                self.assertEqual(payload["temperature"], 0.5)
+                self.assertNotIn("response_format", payload)
+                self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": False})
+
+    def test_judge_timeout_override_reaches_transport_and_provenance(self):
+        args = arguments(full_judge_timeout=42.5)
+        guard = _factory(args)
+        with mock.patch("requests.post", return_value=response()) as post:
+            guard.judge([])
+        self.assertEqual(post.call_args.kwargs["timeout"], 42.5)
+        self.assertEqual(guard.judge.timeout_seconds, 42.5)
+        args._full_baseline_runtime = SimpleNamespace(
+            guard=guard, method=args.method, state_path="", experiment_identity="test")
+        self.assertEqual(baseline_run_provenance(args)["judge_timeout_seconds"], 42.5)
+
+    def test_invalid_judge_timeout_fails_before_any_provider_call(self):
+        for timeout in (0, -1, float("nan"), float("inf"), -float("inf"), "invalid"):
+            with self.subTest(timeout=timeout), mock.patch("requests.post") as post:
+                with self.assertRaisesRegex(ValueError, "positive finite"):
+                    _factory(arguments(full_judge_timeout=timeout))
+                post.assert_not_called()
+
+    def test_judge_timeout_flag_defaults_to_profile_selection(self):
+        parser = argparse.ArgumentParser()
+        add_full_baseline_args(parser)
+        self.assertTrue(hasattr(parser.parse_args([]), "full_judge_timeout"), "missing timeout flag")
+        self.assertIsNone(parser.parse_args([]).full_judge_timeout)
+        self.assertEqual(parser.parse_args(["--full-judge-timeout", "240.5"]).full_judge_timeout, 240.5)
+        for timeout in ("0", "-1", "nan", "inf"):
+            with self.subTest(timeout=timeout), mock.patch("sys.stderr", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(["--full-judge-timeout", timeout])
+
+    def test_judge_timeout_config_override_is_supported(self):
+        parser = argparse.ArgumentParser()
+        add_full_baseline_args(parser, {"defense": {"full": {"full_judge_timeout": 240.5}}})
+        self.assertTrue(hasattr(parser.parse_args([]), "full_judge_timeout"), "missing timeout flag")
+        self.assertEqual(parser.parse_args([]).full_judge_timeout, 240.5)
 
     def test_explicit_thinking_enabled_is_preserved(self):
         guard = _factory(arguments(disable_chat_thinking=False))

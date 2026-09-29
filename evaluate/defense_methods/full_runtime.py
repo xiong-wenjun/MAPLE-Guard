@@ -12,6 +12,7 @@ import functools
 import hashlib
 import inspect
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -30,6 +31,15 @@ class FullBaselineProviderError(SystemExit):
     # Escape ordinary exception handlers in released baseline implementations.
     fatal_for_benchmark = True
 
+def _positive_judge_timeout(value):
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("full-judge-timeout must be a positive finite number") from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("full-judge-timeout must be a positive finite number")
+    return seconds
+
 def add_full_baseline_args(parser, config=None):
     import argparse
     config = config or {}
@@ -38,6 +48,9 @@ def add_full_baseline_args(parser, config=None):
                         default=bool(cfg.get("peer_communication", False)),
                         help="Expose previous-round incoming-edge messages; enabled by full methods. Use for all comparison arms.")
     parser.add_argument("--strict-comparison", action=argparse.BooleanOptionalAction, default=bool(cfg.get("strict_comparison", False)), help="Use operational metadata and matched runtime for MAPLE/no-defense controls.")
+    parser.add_argument("--full-judge-timeout", type=_positive_judge_timeout,
+                        default=cfg.get("full_judge_timeout"),
+                        help="Judge request timeout in seconds (positive finite); default: 600 for released AgentXposed profiles, 120 otherwise.")
     specs = (
         ("amemguard-top-k", int, 4),
         ("amemguard-lesson-top-k", int, 4),
@@ -142,6 +155,7 @@ def baseline_run_provenance(args):
     return {"method":runtime.method, "experiment_identity":getattr(runtime,"experiment_identity",None),
             "runtime":type(runtime).__name__, "component":type(guard).__name__ if guard is not None else None,
             "judge_model":judge_model,
+            "judge_timeout_seconds":getattr(getattr(guard,"judge",None),"timeout_seconds",None),
             "embedding_model":getattr(args,"embed_model",""),
             "state_path":getattr(runtime,"state_path",""),"provenance":provenance,
             "provider_calls":{name:getattr(getattr(guard,name,None),"counters",None) for name in ("judge","embed")},
@@ -155,6 +169,17 @@ def _component_args(args):
                              if key.startswith(prefixes) or key in ("method", "agents")})
 
 def _factory(args):
+    judge_timeout = getattr(args, "full_judge_timeout", None)
+    if judge_timeout is None:
+        # AgentXposed's unpinned openai>=0.27.0 requirement uses legacy calls.
+        # openai-python v0.27.0 api_requestor.TIMEOUT_SECS is 600; this is not
+        # evidence of the exact SDK version used by the original experiments.
+        released_agentxposed = (
+            args.method.startswith("agentxposed_full_")
+            and getattr(args, "agentxposed_protocol", "released_minimal_fix")
+            in {"released_minimal_fix", "released_unmodified"})
+        judge_timeout = 600 if released_agentxposed else 120
+    judge_timeout = _positive_judge_timeout(judge_timeout)
     if not (getattr(args, "full_judge_base_url", "") or getattr(args, "chat_base_url", "")) or not (getattr(args, "full_judge_model", "") or getattr(args, "chat_model", "")):
         raise ValueError("A full judge base URL and model (or chat URL/model) are required")
     def judge(messages, *, temperature=0.0, response_format="json_object"):
@@ -180,7 +205,7 @@ def _factory(args):
             # Use the host transport so API failures and token usage are recorded
             # by run_instrumented before released code can catch them.
             with requests.post(base.rstrip("/") + "/chat/completions",
-                               json=payload, headers=headers, timeout=120) as response:
+                               json=payload, headers=headers, timeout=judge_timeout) as response:
                 response.raise_for_status()
                 result = response.json()
             choice = result["choices"][0]
@@ -198,6 +223,7 @@ def _factory(args):
                     "strict comparison cannot use a fallback response.") from exc
             raise
     judge = tracked_client(judge)
+    judge.timeout_seconds = judge_timeout
     public = _component_args(args)
     if args.method == "agentsafe_full":
         from .agentsafe_full import AgentSafeFull
