@@ -39,6 +39,16 @@ class ReproductionTests(unittest.TestCase):
         self.assertFalse(recipe["original_random_seed_known"])
         self.assertFalse(recipe["training_completed"])
 
+    def test_qwen_generation_adaptation_is_explicit_and_original_remains_unchanged(self):
+        original=repro.infa_recipe("/source","/job","/data","gpt-4o-mini",42)
+        adapted=repro.infa_recipe("/source","/job","/data","Qwen/Qwen3.5-122B-A10B",42,"qwen_no_thinking")
+        self.assertEqual(original["request_overrides"],{})
+        self.assertEqual(adapted["request_overrides"],{"extra_body":{"chat_template_kwargs":{"enable_thinking":False}}})
+        self.assertTrue(adapted["model_substitution"])
+        self.assertEqual(original["training"],adapted["training"])
+        with self.assertRaisesRegex(ValueError,"Qwen"):
+            repro.infa_recipe("/source","/job","/data","gpt-4o-mini",42,"qwen_no_thinking")
+
     def test_heldout_understands_all_five_bundle_question_fields(self):
         rows = [
             {"tasks":[{"data":{"question":{"stem":"CSQA question","choices":[]}}}]},
@@ -146,6 +156,15 @@ class ReproductionTests(unittest.TestCase):
                  patch("tools.run_infa_release_stage.require_training_data"):
                 with self.assertRaisesRegex(ValueError,"cannot enter"):
                     run_stage(recipe,"train",0,[],protocol_check=True)
+
+    def test_existing_host_profile_accepts_pytorch_bert_weight_filename(self):
+        with tempfile.TemporaryDirectory() as d:
+            bert=Path(d)/"bert-base-uncased";bert.mkdir()
+            for name in ("config.json","vocab.txt","pytorch_model.bin"):
+                (bert/name).write_text("fixture")
+            ctx=DefenseContext("guardian","q","q",0,[],SimpleNamespace(
+                official_defense_guardian_bert_dir=str(bert)))
+            self.assertEqual(guardian._guardian_bert_parent(ctx),Path(d))
 
     def test_explicit_bad_bert_directory_never_falls_back(self):
         ctx = DefenseContext("guardian", "q", "q", 0, [], SimpleNamespace(

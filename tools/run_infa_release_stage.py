@@ -18,11 +18,15 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from evaluate.defense_methods import reproduction as r
 
-def install_api_audit(path):
+def install_api_audit(path, request_overrides=None):
     """Observe the upstream request unchanged and fail on incomplete generations."""
     from openai.resources.chat.completions import AsyncCompletions
     original = AsyncCompletions.create
+    overrides = request_overrides or {}
     async def audited(self, *args, **kwargs):
+        if set(kwargs) & set(overrides):
+            raise ValueError("Declared request adaptation would overwrite an upstream argument")
+        kwargs = {**kwargs, **overrides}
         try:
             response = await original(self, *args, **kwargs)
         except Exception as exc:
@@ -33,7 +37,7 @@ def install_api_audit(path):
         choice = choices[0] if choices else None
         content = choice.message.content if choice is not None else None
         reason = choice.finish_reason if choice is not None else None
-        row = {"model":kwargs.get("model"),"finish_reason":reason,
+        row = {"model":kwargs.get("model"),"request_overrides":overrides,"finish_reason":reason,
                "content_chars":len(content or ""),
                "completion_tokens":getattr(response.usage,"completion_tokens",None),
                "prompt_tokens":getattr(response.usage,"prompt_tokens",None),
@@ -159,7 +163,7 @@ def run_stage(recipe, stage, grid_index, heldout, services="", service="", proto
     before=set(destination.glob("*.json")) if destination.exists() else set()
     old=Path.cwd()
     if stage=="generate":
-        install_api_audit(logdir/(label+"-api.jsonl"))
+        install_api_audit(logdir/(label+"-api.jsonl"), recipe["request_overrides"])
     try:
         os.chdir(job);prepare_native_imports(job);sys.argv=argv
         with (logdir/(label+".log")).open("x") as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
@@ -183,6 +187,7 @@ def run_stage(recipe, stage, grid_index, heldout, services="", service="", proto
     report={"runtime_versions":versions,"native_import_paths":imported,"stage":stage,"status":"completed","protocol_check":protocol_check,
             "source_revision":recipe["source_revision"],"seed":seed,
             "generator_model":recipe["generator_model"],"model_substitution":recipe["model_substitution"],
+            "generation_profile":recipe["generation_profile"],"request_overrides":recipe["request_overrides"],
             "author_checkpoint":False}
     if stage=="generate":
         after=set(destination.glob("*.json"))-before
@@ -217,7 +222,7 @@ def main(argv=None):
     recipe=json.loads(Path(args.recipe).read_text())
     expected=r.infa_recipe(recipe["source"],recipe["working_directory"],
          recipe["generation"][0]["argv"][recipe["generation"][0]["argv"].index("--dataset_path")+1],
-         recipe["generator_model"],recipe["reproduction_seed"])
+         recipe["generator_model"],recipe["reproduction_seed"],recipe.get("generation_profile","released"))
     # Reject edited commands even if someone retained an old provenance block.
     candidate={key:value for key,value in recipe.items() if key!="provenance"}
     if candidate!=expected:raise ValueError("Recipe differs from the pinned release specification")

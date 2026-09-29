@@ -94,7 +94,11 @@ def verify_bert(directory):
     return {"bert_revision":load_lock()["assets"]["bert_base_uncased"]["revision"],
             "bert_sha256":files}
 
-def infa_recipe(source, job, dataset, model, seed):
+def infa_recipe(source, job, dataset, model, seed, generation_profile="released"):
+    if generation_profile not in ("released", "qwen_no_thinking"):
+        raise ValueError("Unknown INFA generator profile")
+    if generation_profile == "qwen_no_thinking" and not model.lower().startswith("qwen/"):
+        raise ValueError("Qwen request adaptation requires a Qwen model")
     source, job, dataset = map(lambda p:str(Path(p).resolve()), (source, job, dataset))
     name = "native_infa_s" + str(seed)
     graph = str(Path(job)/f"output/output_{name}/agent_graph_dataset_{name}")
@@ -113,6 +117,9 @@ def infa_recipe(source, job, dataset, model, seed):
         "source_revision":load_lock()["methods"]["infa"]["revision"],
         "source_files":load_lock()["methods"]["infa"]["files"],
         "generator_model":model,"original_generator_model":"gpt-4o-mini",
+        "generation_profile":generation_profile,
+        "request_overrides":({"extra_body":{"chat_template_kwargs":{"enable_thinking":False}}}
+                             if generation_profile=="qwen_no_thinking" else {}),
         "model_substitution":model != "gpt-4o-mini",
         "original_random_seed_known":False,"reproduction_seed":seed,
         "seed_policy":"Python, NumPy and Torch: seed + generation grid index; training: seed",
