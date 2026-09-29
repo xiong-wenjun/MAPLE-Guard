@@ -151,6 +151,9 @@ def baseline_run_provenance(args):
             "gnn_checkpoint":getattr(args,"official_defense_gnn_checkpoint",""),
             "gnn_embedding_model":getattr(args,"official_defense_embedding_model",""),
             "guardian_code_dir":getattr(args,"official_defense_guardian_code_dir",""),
+            "guardian_profile":getattr(args,"official_defense_guardian_profile","host_graph"),
+            "guardian_bert_dir":getattr(args,"official_defense_guardian_bert_dir",""),
+            "guardian_epochs":getattr(args,"official_defense_guardian_epochs",None),
         }
     return {"method":runtime.method, "experiment_identity":getattr(runtime,"experiment_identity",None),
             "runtime":type(runtime).__name__, "component":type(guard).__name__ if guard is not None else None,

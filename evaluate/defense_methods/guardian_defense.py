@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from . import reproduction
 from .base import DefenseContext, OfficialDefenseState, decision, sorted_outputs, text_of_response
 
 
@@ -50,16 +51,28 @@ def _guardian_device(ctx: DefenseContext) -> str:
     )
 
 
-def _guardian_epochs() -> int:
-    raw = os.environ.get("OFFICIAL_DEFENSE_GUARDIAN_EPOCHS", "20")
+def _guardian_epochs(ctx=None) -> int:
+    if ctx is not None and getattr(ctx.args, 'official_defense_guardian_epochs', None) is not None:
+        raw = ctx.args.official_defense_guardian_epochs
+    else:
+        raw = os.environ.get("OFFICIAL_DEFENSE_GUARDIAN_EPOCHS", "20")
     try:
-        return max(1, int(raw))
+        value = int(raw)
+        if ctx is not None and _guardian_profile(ctx) == "released_detector" and value != 20:
+            raise ValueError("Released GUARDIAN requires 20 epochs per round")
+        return max(1, value)
     except (TypeError, ValueError):
+        if ctx is not None and _guardian_profile(ctx) == "released_detector":
+            raise ValueError("Released GUARDIAN requires 20 epochs per round") from None
         return 20
 
 
-def _guardian_bert_parent() -> Optional[Path]:
-    configured = os.environ.get("OFFICIAL_DEFENSE_GUARDIAN_BERT_DIR", "")
+def _guardian_bert_parent(ctx=None) -> Optional[Path]:
+    configured = (getattr(ctx.args, "official_defense_guardian_bert_dir", "") if ctx else "") or os.environ.get("OFFICIAL_DEFENSE_GUARDIAN_BERT_DIR", "")
+    if configured:
+        explicit = Path(configured).expanduser()
+        if explicit.name != "bert-base-uncased" or not all((explicit/name).is_file() for name in ("config.json", "vocab.txt", "model.safetensors")):
+            raise ValueError("Explicit GUARDIAN BERT directory must contain config, vocabulary and weights and be named bert-base-uncased")
     candidates = []
     if configured:
         candidates.append(Path(configured).expanduser())
@@ -76,8 +89,8 @@ def _guardian_bert_parent() -> Optional[Path]:
 
 
 @contextlib.contextmanager
-def _bert_lookup_context():
-    parent = _guardian_bert_parent()
+def _bert_lookup_context(ctx=None):
+    parent = _guardian_bert_parent(ctx)
     if parent is None:
         yield
         return
@@ -87,6 +100,26 @@ def _bert_lookup_context():
         yield
     finally:
         os.chdir(old_cwd)
+
+
+def _guardian_profile(ctx):
+    profile = getattr(ctx.args, "official_defense_guardian_profile", "host_graph")
+    if profile not in ("host_graph", "released_detector"):
+        raise ValueError("Unknown GUARDIAN profile")
+    return profile
+
+
+def _validate_released_profile(ctx, code_dir):
+    if _guardian_epochs(ctx) != 20:
+        raise ValueError("Released GUARDIAN requires 20 epochs per round")
+    if _guardian_device(ctx) != "cpu":
+        raise ValueError("Released GUARDIAN profile preserves upstream CPU execution")
+    provenance = reproduction.verify_source("guardian", Path(code_dir).resolve().parent.parent)
+    parent = _guardian_bert_parent(ctx)
+    if parent is None:
+        raise ValueError("Released GUARDIAN requires pinned local BERT assets")
+    provenance.update(reproduction.verify_bert(parent / "bert-base-uncased"))
+    return provenance
 
 
 def _guardian_runtime_available() -> Tuple[bool, str]:
@@ -164,7 +197,8 @@ def _build_graph_data(runtime: Dict[str, Any], ctx: DefenseContext, history: Seq
         for dst_pos, dst_agent in enumerate(active_ids):
             if src_pos == dst_pos:
                 continue
-            if src_agent < adj.shape[0] and dst_agent < adj.shape[1] and int(adj[src_agent, dst_agent]) != 0:
+            if (_guardian_profile(ctx) == "released_detector" or
+                    (src_agent < adj.shape[0] and dst_agent < adj.shape[1] and int(adj[src_agent, dst_agent]) != 0)):
                 edge_pairs.append((src_pos, dst_pos))
     if not edge_pairs:
         return []
@@ -183,9 +217,9 @@ def _build_graph_data(runtime: Dict[str, Any], ctx: DefenseContext, history: Seq
 
 def _run_official_guardian(runtime: Dict[str, Any], data_list, ctx: DefenseContext) -> Tuple[int, List[float], str]:
     torch = runtime["torch"]
-    epochs = _guardian_epochs()
+    epochs = _guardian_epochs(ctx)
     device = _guardian_device(ctx)
-    with _bert_lookup_context(), contextlib.redirect_stdout(io.StringIO()):
+    with _bert_lookup_context(ctx), contextlib.redirect_stdout(io.StringIO()):
         if len(data_list) <= 1:
             model = runtime["static_module"].DOMINANTDetector(hid_dim=128, num_gnn_layers=2).to(device)
             optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -221,9 +255,19 @@ def _allow_with_reason(outputs: Dict[int, Any], state: OfficialDefenseState, rea
 
 
 def apply_guardian(outputs: Dict[int, Any], state: OfficialDefenseState, ctx: DefenseContext):
-    state.guardian_history.append({int(idx): text_of_response(response) for idx, response in sorted_outputs(outputs)})
-
     code_dir = _guardian_code_dir(ctx)
+    profile = _guardian_profile(ctx)
+    texts = {int(idx): text_of_response(response) for idx, response in sorted_outputs(outputs)}
+    release = {}
+    if profile == "released_detector":
+        key = ("released_profile", code_dir, str(_guardian_bert_parent(ctx)),
+               _guardian_epochs(ctx), _guardian_device(ctx))
+        cache = _runtime_cache(state)
+        if key not in cache:
+            cache[key] = (_validate_released_profile(ctx, code_dir), reproduction.guardian_parser(code_dir))
+        release, parser = cache[key]
+        texts = {idx: parser(text) for idx, text in texts.items()}
+    state.guardian_history.append(texts)
     runtime_ok, runtime_error = _guardian_runtime_available()
     details = {
         "method_scope": "temporal_graph_communication_anomaly",
@@ -231,9 +275,17 @@ def apply_guardian(outputs: Dict[int, Any], state: OfficialDefenseState, ctx: De
         "memory_read_firewall": False,
         "memory_promotion_gate": False,
         "official_source": "JialongZhou666/GUARDIAN",
+        "guardian_profile": profile,
+        "detector_checkpoint_required": False,
+        "detector_graph": "active_complete_directed" if profile == "released_detector" else "host_adjacency",
+        "node_text": "released_parsed_answer" if profile == "released_detector" else "host_response",
+        "release_assets": release,
+        "end_to_end_official_reproduction": False,
+        "host_adaptations": ["MAPLE agent prompts, task protocol, round scheduling and final voting",
+                             "active node positions mapped to actual agent IDs"],
         "history_turns": len(state.guardian_history),
         "inactive_agents": sorted(state.guardian_inactive_agents),
-        "guardian_epochs": _guardian_epochs(),
+        "guardian_epochs": _guardian_epochs(ctx),
         "guardian_device": _guardian_device(ctx),
     }
     if code_dir:
