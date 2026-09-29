@@ -157,6 +157,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embed-base-url", default=cfg_get(cfg, "embed_base_url", "http://127.0.0.1:8000/v1"))
     parser.add_argument("--embed-model", default=cfg_get(cfg, "embed_model", "Qwen3-Embedding-8B"))
     parser.add_argument("--max-tokens", type=int, default=int(cfg_get(cfg, "max_tokens", 192)))
+    parser.add_argument("--chat-timeout", type=float, default=float(cfg_get(cfg, "chat_timeout", 180)),
+                        help="Task response transport timeout in seconds; generation settings are unchanged.")
     parser.add_argument("--ta-peer-message-max-chars", type=int, default=int(cfg_get(cfg, "ta_peer_message_max_chars", 700)))
     parser.add_argument("--ta-observation-max-chars", type=int, default=int(cfg_get(cfg, "ta_observation_max_chars", 5200)))
     parser.add_argument("--chat-history-max-chars", type=int, default=int(cfg_get(cfg, "chat_history_max_chars", 1200)))
@@ -192,6 +194,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--write-final-json", action=argparse.BooleanOptionalAction, default=bool(cfg_get(cfg, "write_final_json", True)))
     add_full_baseline_args(parser, cfg)
     args = parser.parse_args()
+    if not 0 < args.chat_timeout < float("inf"):
+        parser.error("--chat-timeout must be positive and finite")
     if not args.attack_mode:
         parser.error("--attack-mode is required, either directly or via --config")
     if not args.chat_base_url:
@@ -1128,7 +1132,7 @@ def run_one_method(ep: Any, records: Sequence[Dict[str, Any]], method: str, args
                 def generate(model_messages):
                     return ep.call_chat(
                         args.chat_base_url, args.chat_model, model_messages, temperature=0.0,
-                        timeout=180, max_tokens=args.max_tokens, chat_template_kwargs=chat_kwargs,
+                        timeout=args.chat_timeout, max_tokens=args.max_tokens, chat_template_kwargs=chat_kwargs,
                     )
                 # Keep task/tool context runner-side; defenses never inspect private roles.
                 if runtime is not None:
