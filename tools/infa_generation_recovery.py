@@ -43,7 +43,7 @@ def complete(response, accepted_finish_reasons=("stop",)):
     item=choices[0]
     return item.finish_reason in accepted_finish_reasons and isinstance(item.message.content,str) and bool(item.message.content.strip())
 
-def make_audited_create(original, audit_path, request_overrides, recovery_policy, cache_dir):
+def make_audited_create(original, audit_path, request_overrides, recovery_policy, cache_dir, replay_only=False):
     from openai.types.chat import ChatCompletion
     from openai import APIConnectionError,APITimeoutError,APIStatusError
     budgets,reasons=policy_bounds(recovery_policy)
@@ -90,6 +90,8 @@ def make_audited_create(original, audit_path, request_overrides, recovery_policy
                     "content_chars":len(response.choices[0].message.content),
                     "max_tokens":row["accepted_max_tokens"]})
             return response
+        if replay_only:
+            raise ValueError("Missing cached INFA response during cache-only verification")
         for budget in budgets:
             current={**request,"max_tokens":budget}
             for attempt in range(1,attempts+1):
