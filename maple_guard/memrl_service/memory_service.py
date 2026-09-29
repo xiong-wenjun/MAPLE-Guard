@@ -314,6 +314,30 @@ class MemoryService:
             user_id: User ID for multi-tenant memory management
             **kwargs: Additional configuration parameters
         """
+        # Durable task resume only reopens the original local cube. Validate before
+        # providers, MOS, or directory creation can mutate any working state.
+        resume_timestamp = kwargs.get("resume_cube_timestamp")
+        if resume_timestamp is not None:
+            import json
+            import os
+            import re
+            if not isinstance(resume_timestamp, str) or not re.fullmatch(r"[0-9]{8}_[0-9]{6}", resume_timestamp):
+                raise ValueError("Invalid resume_cube_timestamp")
+            datetime.strptime(resume_timestamp, "%Y%m%d_%H%M%S")
+            resume_base = os.path.abspath(kwargs.get("base_root", "./results/mem_cubes"))
+            resume_cube = os.path.join(resume_base, user_id, resume_timestamp)
+            resume_qdrant = os.path.abspath(os.path.join(resume_base, "..", "qdrant", user_id, resume_timestamp))
+            if not os.path.isdir(resume_cube) or not os.path.isdir(resume_qdrant):
+                raise ValueError("Durable resume requires the original cube and Qdrant directories")
+            with open(os.path.join(resume_cube, "config.json"), encoding="utf-8") as handle:
+                saved_config = json.load(handle)
+            saved_vector = saved_config["text_mem"]["config"]["vector_db"]["config"]
+            if (saved_vector["path"] != resume_qdrant
+                    or saved_vector["collection_name"] != f"memp_{user_id}_{resume_timestamp}"
+                    or saved_vector["vector_dimension"] != kwargs.get("embedding_dim")):
+                raise ValueError("Durable resume cube configuration mismatch")
+            if not isinstance(kwargs.get("embedding_dim"), int) or kwargs["embedding_dim"] <= 0:
+                raise ValueError("Durable resume requires saved embedding_dim")
         # Set strategy configuration
         self.strategy_config = (
             strategy_config or StrategyConfiguration.main_combination()
@@ -372,7 +396,7 @@ class MemoryService:
             base_root = os.path.abspath(kwargs.get("base_root", "./results/mem_cubes"))
             os.makedirs(base_root, exist_ok=True)
             # timestamped cube dir for historical isolation
-            ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ts_str = resume_timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
             self._base_root = base_root
             self._cube_timestamp = ts_str
             cube_dir = os.path.join(base_root, self.user_id, ts_str)
@@ -439,7 +463,11 @@ class MemoryService:
                 para_mem={"backend": "uninitialized", "config": {}},
             )
             # Use a stable mem_cube_id and prefer reusing an existing cube from disk
-            if os.listdir(cube_dir):
+            if resume_timestamp is not None:
+                # Open the durable vector store directly; the old textual dump may
+                # be stale and must not reinsert/overwrite checkpointed vectors.
+                cube = GeneralMemCube.init_from_dir(cube_dir, memory_types=[])
+            elif os.listdir(cube_dir):
                 try:
                     cube = GeneralMemCube.init_from_dir(cube_dir)
                     print("reuse existing cube")

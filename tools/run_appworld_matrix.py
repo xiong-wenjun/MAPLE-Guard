@@ -58,6 +58,7 @@ def freeze_configs(run_root, topologies):
 
 def arguments():
     p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--task-checkpoints", action="store_true", help="Save complete per-task checkpoints for provenance_acl.")
     p.add_argument("--bundle",required=True)
     p.add_argument("--services",required=True,help="0600 credential file; contents never written to manifests")
     p.add_argument("--task-service",default="inference1")
@@ -139,6 +140,8 @@ def source_fingerprint():
     return digest.hexdigest()
 
 def build_job(args, method, seed, services, topology="star", config_snapshot=None):
+    if getattr(args, "task_checkpoints", False) and method != "provenance_acl":
+        raise ValueError("Task checkpoints currently support provenance_acl only")
     if method not in MAIN+MECHANISM+GATES+IDENTITY_AUDIT: raise ValueError("Unrecognized experiment method: "+method)
     if args.profile=="paper-code" and method not in ("maple_guard","no_defense_memrl"):
         raise ValueError("Paper-code bridge currently restricted to original MAPLE and No Defense")
@@ -160,6 +163,8 @@ def build_job(args, method, seed, services, topology="star", config_snapshot=Non
          "--trace-id",run_id,"--memory-run-id",run_id,"--baseline-experiment-id",run_id,
          "--memory-store-dir",str(run_dir/"memory"),"--baseline-state-path",str(run_dir/"baseline-state.json"),
          "--out",str(run_dir/"trace.jsonl"),"--log-every","1"]
+    if getattr(args, "task_checkpoints", False):
+        cmd += ["--task-checkpoint-dir", str(run_dir/"task-checkpoints")]
     if args.profile=="strict":
         cmd += ["--strict-comparison","--peer-communication","--no-exclude-attackers-from-final-vote",
                 "--no-enable-causal-mir","--benign-shared-promotion-policy","accepted_retrieved_private",

@@ -460,7 +460,7 @@ class MemRLMemoryBackend:
         )
         llm = OpenAICompatibleLLM(self.args.chat_base_url, self.args.chat_model, api_key=api_key)
         embedder = OpenAICompatibleEmbedder(self.args.embed_base_url, self.args.embed_model, api_key=embed_api_key, strict=_strict_backend(self.args))
-        self._service = MemoryService(
+        service_kwargs = dict(
             mos_config_path=self._mos_config_path,
             llm_provider=llm,
             embedding_provider=embedder,
@@ -472,6 +472,16 @@ class MemRLMemoryBackend:
             base_root=os.path.join(store_dir, "mem_cubes"),
             mem_cache_max_size=20000,
         )
+        resume_state = getattr(self, "_task_checkpoint_service", None)
+        if resume_state is not None:
+            if __package__:
+                from .task_checkpoint import recreate_service
+            else:
+                from task_checkpoint import recreate_service
+            self._service = recreate_service(MemoryService, service_kwargs, resume_state)
+            self._task_checkpoint_service = None
+        else:
+            self._service = MemoryService(**service_kwargs)
         return self._service
 
     def add_entry(self, entry: Any, success: Optional[bool] = None) -> str:
