@@ -80,3 +80,51 @@ validation and the reserved existing cells.
 
 AgentSafe, native INFA, and GUARDIAN retain their explicit asset/identity blockers. More seeds do not
 resolve missing official components. No blocked baseline is replaced by a fallback.
+
+## Bounded dispatcher
+
+The prepared manifest does not launch itself. Use `tools/dispatch_appworld_matrix.py`
+on each assigned execution host with `--execute` to run its Qwen and Gemma shards.
+Without that flag it prints a read-only scheduling preview. The dispatcher imports
+the frozen matrix engine and uses the original job commands unchanged; its own
+code revision is separate from the experimental engine revision.
+
+The 2026-09-29 deployment uses a maximum of two additional workers per host and
+one additional Gemma worker per host. Total local worker budgets are eight on
+inference1 and six on inference2, counting the already-running pilots and probes.
+If an existing campaign already exceeds the budget, the dispatcher waits for
+capacity. Existing campaign supervisors may replace their own finished jobs, so
+this is an admission budget for the new queue, not a global process hard limit.
+
+All star/42 reservations remain owned by the existing campaigns, including those
+still in their queues. A reservation is not a completed result. Blocked methods
+remain blocked. AgentXposed must finish its corrected two-task probe before
+expansion. Other methods require successful two-task probes with a summary and
+clean API journal; the base No Defense and MAPLE Qwen arms additionally allow
+the current healthy strict pilot's first two completed tasks as readiness evidence.
+Neither kind of readiness evidence is a final result or a performance claim.
+
+Each host holds an exclusive dispatcher lock. Existing run directories are
+never reused; live workers are identified by their exact run ID in /proc command
+arguments on the correct host. Restarting the dispatcher reserves surviving
+workers and their capacity without rerunning them. A dead unfinished worker
+requires investigation; its memory is not automatically resumed or discarded.
+A failed pilot holds that model/method's future cells across both shards while
+other validated families can continue. No automatic retry is performed.
+
+At startup, the dispatcher checks the frozen engine fingerprint, dataset and
+topology config hashes, model/service identities and duplicate cells. Credentials
+remain outside Git. Progress is written to execution-inference1.json and
+execution-inference2.json; the preparation manifests remain unchanged. Per-cell
+run.json, trace and API journal are authoritative for actual execution.
+
+Example (replace the hostname and limits for the assigned host):
+
+    python tools/dispatch_appworld_matrix.py --plan-root /path/to/prepared-plan \
+      --engine-root /path/to/frozen-code --services /path/to/private-services.json \
+      --host inference2 --expected-hostname ACTUAL_HOSTNAME \
+      --max-total-workers 6 --max-new-workers 2 --max-new-gemma 1 --execute
+
+The queue is deliberately bounded: activating 1,320 planned cells never means
+starting 1,320 concurrent workers. Only completed and separately validated
+200-task results can be reported as matrix coverage.
