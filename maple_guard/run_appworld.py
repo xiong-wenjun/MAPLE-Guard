@@ -55,6 +55,8 @@ def _cfg(path: str) -> Dict[str, Any]:
 def _parse_appworld_known(argv: Sequence[str]) -> tuple[argparse.Namespace, List[str], Dict[str, Any]]:
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--config", default=os.environ.get("CONFIG_YAML", DEFAULT_CONFIG))
+    pre.add_argument("--task-checkpoint-dir", default="", help="Atomic task checkpoints for provenance_acl only.")
+    pre.add_argument("--resume-task-checkpoint", action="store_true", help="Restore an existing complete task checkpoint.")
     pre.add_argument("--benchmark-bundle", default="", help="Frozen user bundle; evaluates action selection, not native AppWorld execution.")
     pre.add_argument("--appworld-root", default="")
     pre.add_argument("--appworld-split", default="")
@@ -78,6 +80,8 @@ def parse_args() -> argparse.Namespace:
         args = stream.parse_args()
     finally:
         sys.argv = original_argv
+    args.task_checkpoint_dir = appworld_args.task_checkpoint_dir
+    args.resume_task_checkpoint = appworld_args.resume_task_checkpoint
     args.benchmark_bundle = appworld_args.benchmark_bundle
     args.appworld_root = appworld_args.appworld_root
     args.appworld_split = appworld_args.appworld_split
@@ -200,6 +204,14 @@ def add_appworld_summary(summary: Dict[str, Any], records: Sequence[stream.Strea
 
 def main() -> None:
     args = stream.resolve_args(parse_args())
+    if getattr(args, "task_checkpoint_dir", ""):
+        from maple_guard.task_checkpoint import run_lock
+        with run_lock(args):
+            return run_stream(args)
+    return run_stream(args)
+
+
+def run_stream(args: argparse.Namespace) -> None:
     random.seed(args.seed)
     manifest = ensure_appworld_index(args)
     args.dataset = args.benchmark_bundle or args.dataset or dataset_for_split(args)
@@ -211,6 +223,30 @@ def main() -> None:
     if not task_stream:
         raise ValueError("Empty AppWorld task stream")
     poison_indices: Set[int] = stream.choose_poison_indices(len(task_stream), args)
+
+    checkpoint_enabled = bool(getattr(args, "task_checkpoint_dir", ""))
+    resume = bool(getattr(args, "resume_task_checkpoint", False))
+    if resume and not checkpoint_enabled:
+        raise ValueError("--resume-task-checkpoint requires --task-checkpoint-dir")
+    if checkpoint_enabled and args.method != "provenance_acl":
+        raise ValueError("Task checkpoints currently support provenance_acl only")
+    if checkpoint_enabled and not resume and Path(args.out).exists():
+        raise ValueError("Fresh checkpoint run requires an unused trace path")
+    restored = None
+    if checkpoint_enabled:
+        from maple_guard.task_checkpoint import load_checkpoint, restore_bundle, save_checkpoint
+        if resume:
+            restored = load_checkpoint(args)
+            state = restored["stream_state"]
+            next_index = state["next_task_index"]
+            if (not isinstance(next_index, int) or isinstance(next_index, bool)
+                    or not 0 <= next_index <= len(task_stream)
+                    or len(state["records"]) != next_index
+                    or state["task_ids"] != [task.task_id for task in task_stream]
+                    or state["poison_indices"] != sorted(poison_indices)
+                    or [record["task_index"] for record in state["records"]] != list(range(next_index))
+                    or [record["task_id"] for record in state["records"]] != [task.task_id for task in task_stream[:next_index]]):
+                raise ValueError("Checkpoint task order, schedule or completed prefix does not match")
 
     out_dir = os.path.dirname(args.out)
     if out_dir:
@@ -230,6 +266,36 @@ def main() -> None:
     poisoned_memory_origins: Dict[str, int] = {}
     agent_trust: Dict[int, float] = {i: 0.5 for i in range(args.agents)}
     records: List[stream.StreamTaskRecord] = []
+    start_index = 0
+    if restored is not None:
+        restore_bundle(memory_backend, restored)
+        private_memories = memory_backend.private_memories
+        shared_memories = memory_backend.shared_memories
+        state = restored["stream_state"]
+        start_index = state["next_task_index"]
+        records = [stream.StreamTaskRecord(**record) for record in state["records"]]
+        poisoned_memory_targets = state["poison_targets"]
+        poisoned_memory_target_texts = state["poison_target_texts"]
+        poisoned_memory_pattern_texts = state["poison_pattern_texts"]
+        poisoned_memory_origins = state["poison_origins"]
+        agent_trust = {int(k):v for k,v in state["agent_trust"].items()}
+        args._poison_target_cache = state["args_poison_target_cache"]
+        args._poison_target_reason_cache = state["args_poison_target_reason_cache"]
+
+    def checkpoint_state(next_index):
+        return {
+            "next_task_index":next_index,
+            "task_ids":[task.task_id for task in task_stream],
+            "poison_indices":sorted(poison_indices),
+            "records":[asdict(record) for record in records],
+            "poison_targets":poisoned_memory_targets,
+            "poison_target_texts":poisoned_memory_target_texts,
+            "poison_pattern_texts":poisoned_memory_pattern_texts,
+            "poison_origins":poisoned_memory_origins,
+            "agent_trust":agent_trust,
+            "args_poison_target_cache":getattr(args, "_poison_target_cache", {}),
+            "args_poison_target_reason_cache":getattr(args, "_poison_target_reason_cache", {}),
+        }
 
     stream.log_progress(
         args,
@@ -240,8 +306,14 @@ def main() -> None:
         f"comm={args.communication_topology} sparsity={args.communication_sparsity} out={args.out}",
     )
     start_time = time.time()
-    with open(args.out, "w", encoding="utf-8") as f:
+    with open(args.out, "a" if resume else "w", encoding="utf-8") as f:
+        if checkpoint_enabled and not resume:
+            f.flush()
+            os.fsync(f.fileno())
+            save_checkpoint(args, memory_backend, checkpoint_state(0), args.out)
         for idx, task in enumerate(task_stream):
+            if idx < start_index:
+                continue
             t0 = time.time()
             record = stream.run_stream_task(
                 args.trace_id,
@@ -262,6 +334,9 @@ def main() -> None:
             stream.update_agent_trust(agent_trust, record, args)
             f.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
             f.flush()
+            if checkpoint_enabled:
+                os.fsync(f.fileno())
+                save_checkpoint(args, memory_backend, checkpoint_state(idx + 1), args.out)
             if args.log_every > 0 and ((idx + 1) % args.log_every == 0 or idx + 1 == len(task_stream)):
                 stream.log_progress(args, stream.short_status(idx, len(task_stream), record, time.time() - t0))
 
