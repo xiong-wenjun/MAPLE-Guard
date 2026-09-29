@@ -489,6 +489,9 @@ class MemRLMemoryBackend:
         self.entries[str(entry.memory_id)] = entry
         self.backend_ids[str(entry.memory_id)] = str(backend_id)
         setattr(entry, "backend_memory_id", str(backend_id))
+        # Storage ownership differs from provenance: a peer's message is stored
+        # in the recipient's private cube, while origin_agent remains its author.
+        setattr(entry, "backend_store_id", self.user_id)
         return str(backend_id)
 
     def retrieve_entries(
@@ -531,8 +534,10 @@ class MemRLMemoryBackend:
 
     def update_value(self, entry: Any, success: bool) -> None:
         maple_guard_id = str(getattr(entry, "memory_id", ""))
-        backend_id = getattr(entry, "backend_memory_id", None) or self.backend_ids.get(maple_guard_id)
+        backend_id = self.backend_ids.get(maple_guard_id) or getattr(entry, "backend_memory_id", None)
         if not backend_id:
+            if _strict_backend(self.args):
+                raise RuntimeError("Strict baseline feedback requires a registered memory ID")
             return
         try:
             service = self._ensure_service()
@@ -612,6 +617,9 @@ class MemRLMemoryBackend:
             self.entries[maple_guard_id] = entry
         self.backend_ids[maple_guard_id] = backend_id
         setattr(entry, "backend_memory_id", backend_id)
+        # Reconstructed entries take their physical owner from this backend,
+        # never from author/scope fields in memory content or metadata.
+        setattr(entry, "backend_store_id", self.user_id)
         setattr(entry, "backend_score", candidate.get("score"))
         setattr(entry, "backend_similarity", candidate.get("similarity"))
         setattr(entry, "backend_maple_guard_score", candidate.get("maple_guard_backend_score"))
@@ -666,6 +674,18 @@ class MemoryBackendBundle:
         return self.shared_backend.retrieve_entries(query, top_k=top_k, threshold=threshold, method=method, agent_id=agent_id, task_class=task_class)
 
     def update_value(self, entry: Any, success: bool) -> None:
+        store_id = getattr(entry, "backend_store_id", None)
+        stores = [*self.private_backends.values(), self.shared_backend, self.quarantine_backend]
+        if store_id is not None:
+            for backend in stores:
+                if backend.user_id == store_id:
+                    backend.update_value(entry, success)
+                    return
+            raise RuntimeError("Feedback references a memory store outside this experiment")
+        if _strict_backend(self.args):
+            raise RuntimeError("Strict baseline feedback requires a registered physical memory store")
+        # Preserve the historical in-memory/legacy path for entries without a
+        # physical store marker; strict runs must never infer ownership from authorship.
         scope = getattr(entry, "memory_scope", "agent_private")
         if scope == "team":
             self.shared_backend.update_value(entry, success)

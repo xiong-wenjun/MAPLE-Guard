@@ -45,6 +45,8 @@ def chat_completion(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if getattr(args, "disable_chat_thinking", False) or os.getenv("CHAT_DISABLE_THINKING") == "1":
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     if response_format:
         payload["response_format"] = response_format
     headers = {"Content-Type": "application/json"}

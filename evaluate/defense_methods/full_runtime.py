@@ -25,6 +25,11 @@ FULL_METHODS = ("agentsafe_full", "infa_guard_full",
                 "agentxposed_full_guide", "agentxposed_full_kick")
 _ACTIVE = contextvars.ContextVar("maple_full_baseline", default=None)
 
+
+class FullBaselineProviderError(SystemExit):
+    # Escape ordinary exception handlers in released baseline implementations.
+    fatal_for_benchmark = True
+
 def add_full_baseline_args(parser, config=None):
     import argparse
     config = config or {}
@@ -96,7 +101,7 @@ def tracked_client(function):
         counters["calls"] += 1
         try:
             return function(*args, **kwargs)
-        except Exception:
+        except (Exception, SystemExit):
             counters["errors"] += 1
             raise
         finally:
@@ -153,7 +158,7 @@ def _factory(args):
     if not (getattr(args, "full_judge_base_url", "") or getattr(args, "chat_base_url", "")) or not (getattr(args, "full_judge_model", "") or getattr(args, "chat_model", "")):
         raise ValueError("A full judge base URL and model (or chat URL/model) are required")
     def judge(messages, *, temperature=0.0, response_format="json_object"):
-        import urllib.request
+        import requests
         base = getattr(args, "full_judge_base_url", "") or getattr(args, "chat_base_url", "")
         model = getattr(args, "full_judge_model", "") or getattr(args, "chat_model", "")
         if not base or not model:
@@ -171,30 +176,43 @@ def _factory(args):
         headers = {"Content-Type":"application/json"}
         if key:
             headers["Authorization"] = "Bearer " + key
-        request = urllib.request.Request(base.rstrip("/") + "/chat/completions",
-            data=json.dumps(payload).encode(), headers=headers)
-        with urllib.request.urlopen(request, timeout=120) as response:
-            result = json.load(response)
-        choice = result["choices"][0]
-        if choice.get("finish_reason") == "length":
-            raise RuntimeError("Full baseline judge output was truncated")
-        return choice["message"]["content"]
+        try:
+            # Use the host transport so API failures and token usage are recorded
+            # by run_instrumented before released code can catch them.
+            with requests.post(base.rstrip("/") + "/chat/completions",
+                               json=payload, headers=headers, timeout=120) as response:
+                response.raise_for_status()
+                result = response.json()
+            choice = result["choices"][0]
+            if choice.get("finish_reason") == "length":
+                raise RuntimeError("Full baseline judge output was truncated")
+            content = choice["message"]["content"]
+            if (getattr(args, "strict_comparison", False)
+                    and (not isinstance(content, str) or not content.strip())):
+                raise RuntimeError("Full baseline judge returned no final content")
+            return content
+        except Exception as exc:
+            if getattr(args, "strict_comparison", False):
+                raise FullBaselineProviderError(
+                    f"Full baseline judge failed ({type(exc).__name__}); "
+                    "strict comparison cannot use a fallback response.") from exc
+            raise
     judge = tracked_client(judge)
     public = _component_args(args)
     if args.method == "agentsafe_full":
         from .agentsafe_full import AgentSafeFull
         def embed(text):
             # Never substitute hash embeddings for the configured criterion model.
-            import urllib.request
-            payload = json.dumps({"model":args.embed_model, "input":text}).encode()
+            import requests
+            payload = {"model":args.embed_model, "input":text}
             headers = {"Content-Type":"application/json"}
             key = getattr(args, "embed_api_key", "") or os.getenv("EMBED_API_KEY", "")
             if key:
                 headers["Authorization"] = "Bearer " + key
-            req = urllib.request.Request(args.embed_base_url.rstrip("/") + "/embeddings",
-                                         data=payload, headers=headers)
-            with urllib.request.urlopen(req, timeout=120) as response:
-                value = json.load(response)
+            with requests.post(args.embed_base_url.rstrip("/") + "/embeddings",
+                               json=payload, headers=headers, timeout=120) as response:
+                response.raise_for_status()
+                value = response.json()
             return value["data"][0]["embedding"]
         guard = AgentSafeFull(public, judge, tracked_client(embed))
         required = {str(i) for i in range(int(getattr(args, "agents", 0)))}
