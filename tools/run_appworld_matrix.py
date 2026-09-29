@@ -79,6 +79,8 @@ def arguments():
     p.add_argument("--infa-checkpoint",default="")
     p.add_argument("--minilm-model",default="")
     p.add_argument("--guardian-source",default="")
+    p.add_argument("--guardian-bert-dir",default="")
+    p.add_argument("--guardian-profile",choices=("host_graph","released_detector"),default="released_detector")
     args=p.parse_args()
     for name in ("seeds","topologies","methods"):
         values=getattr(args,name)
@@ -110,8 +112,12 @@ def extras(args, method, run_id):
         if not args.minilm_model: return [],"Official MiniLM encoder asset not yet validated"
         return ["--official-defense-embedding-model",args.minilm_model],None
     if method=="guardian":
-        if not args.guardian_source: return [],"GUARDIAN source/checkpoints/encoder absent; graph-adapter mapping requires verification"
-        return ["--official-defense-guardian-code-dir",args.guardian_source],None
+        if not args.guardian_source or not getattr(args,"guardian_bert_dir",""):
+            return [],"GUARDIAN needs pinned source and BERT; detector trains online, no pretrained detector checkpoint"
+        return ["--official-defense-guardian-code-dir",args.guardian_source,
+                "--official-defense-guardian-bert-dir",args.guardian_bert_dir,
+                "--official-defense-guardian-profile",getattr(args,"guardian_profile","released_detector"),
+                "--official-defense-guardian-epochs","20"],None
     return [],None
 
 def source_fingerprint():

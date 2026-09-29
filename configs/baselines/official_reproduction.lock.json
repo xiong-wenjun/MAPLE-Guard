@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "methods": {
+    "agentsafe": {
+      "repository": "https://github.com/junyuanM/Agentsafe",
+      "revision": "cc253ad48532fa6614a27557587086cfb87968ed",
+      "files": {
+        "Code/agents.py": "077ccaf634a947ecd915f0c83045c609b9d868e8eaf51d3743e58ac63b529bf1",
+        "Code/attack.py": "513c8e357466ffabfdaf937565afff7a0658dc4085d26f68fbb5344694346f93",
+        "Code/groups.py": "992e5ab112591d1d3f91d9765f958cd1b5b872f8e4d5fbd63adc2741cb23c181",
+        "Code/initial.py": "0ad770d71d8e17fa3b709917cee59d33ecf01c437e532815a13e40797db20a94",
+        "Code/process.py": "2a52ee2a2d507d0e5598b48dca70edbb5e96d8bf5ae00307edadc730078f3460"
+      },
+      "paper_config_status": {
+        "criteria": "not released",
+        "admission_threshold": "not released",
+        "relationship_seed": "not released; reproduce generator with declared seed"
+      }
+    },
+    "infa": {
+      "repository": "https://github.com/yjzscode/INFA-Guard",
+      "revision": "80b1156cb22d576d9149046c36c540c728a43dde",
+      "files": {
+        "MAS/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "MAS/agent_prompts.py": "247ceb23ea798ceb9f572a8491f336b4eb1fead94e07c0f10a016d70036ac879",
+        "MAS/agents.py": "b4c7651d3f344ca1092dfd3a880a1c798831ca73e875846cb33b6fa18a93350a",
+        "evaluate/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "evaluate/defense_methods/__init__.py": "3952e9e68e4f6578a2cce549951bf96fb23626984b3185690109df6dd33d7102",
+        "evaluate/defense_methods/agentsafe_defense.py": "13e003eb5d15d1c950e5011196134fa0a5a2165216e472bce1b36f6e5ce8c594",
+        "evaluate/defense_methods/agentxposed_defense.py": "9f72901e8129b80b5ebe2983544dd32fa5b5b7d62236eaf51cd88404ab69f4a7",
+        "evaluate/defense_methods/challenger_defense.py": "cfc3d270736c0e7c3600a50ad79cc0b88bf84dedaf79a94a6d55f64f2b3202f5",
+        "evaluate/defense_methods/gsafeguard_defense.py": "4ab356a3e9154acc9a73978b9807c58148048175b0e4658fd958b44bc398afed",
+        "evaluate/defense_methods/inspector_defense.py": "d87dd02f2245bac569c5c069f23d9d7250d5e4d1955753037919f18fbae5e656",
+        "evaluate/defense_methods/ours_defense.py": "a1e989c377d1470fee90f280bea423d6b41cfda1f8d250de3b608e7b054f51ce",
+        "evaluate/evaluate_output.py": "c7cc9e18acbf544c8c133acd36b30a9e9782ca4335e290b128104e1620add6f9",
+        "evaluate/main_defense_repair_test.py": "f4751443f1ad40173e473983cabc68e17439cb46bcee1c70e0c214615db0f4ae",
+        "evaluate/plot.py": "55b97dc6efe93844b68ff38d0638852ff78931aff7cbc2dd45bd5184982b3a7a",
+        "generate_data/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "generate_data/dataset_utils/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "generate_data/dataset_utils/gen_csqa.py": "f996f7749cf28746b428ff23c24a0daa72f1e8387351d59e7b504ad3f1ad8a41",
+        "generate_data/dataset_utils/gen_gsm8k.py": "3234a58de2b0a9cf0a1fab327bd346528f1f506e04ba721a99cb03ac2c61c535",
+        "generate_data/dataset_utils/gen_memory_attack_data.py": "90c4fbb30491dfa0526b42416d776fa59fda3fc6ff9579c1a5d3177ca9ecbfed",
+        "generate_data/dataset_utils/gen_mmlu.py": "0b0d4943dc0542e287091c030b3db4a112f5cbac6acafeeed5f1df09bcd8589f",
+        "generate_data/dataset_utils/get_tool_attack_data.py": "5d16561ef0ea176654e3046cb41cba854e8013dcfdd10bf39b0d23ef0d9c1e2c",
+        "generate_data/dataset_utils/merge_datasets.py": "7bf126b8d8243b31d909cbe77a1c5b9a10998230b884a03b020b12259365aecc",
+        "generate_data/gen_graph.py": "27ab5a90a0fd80809bd9eed5dde101dfff3128a525b13cbad827bb498936992f",
+        "generate_data/gen_training_dataset.py": "f6c13c046a6cc0b4acfc9cd0080e5f78f539e8aa7cdb346ad2161c1d6d1f479d",
+        "generate_data/post_label_infection.py": "40862400f7adc5035e3772cdb85bb89eea12bcb8e8d1ccc7b2d3bbffb1633e70",
+        "scripts/run_evaluation.sh": "d3501e39cd25713dc620002e416932fc573de7ad41f6f3982a6cbc00aca33478",
+        "scripts/run_full_pipeline.sh": "d34b1ea334908981bd93effffe422b30ac3732e5b3628a11dc9050bcc20bc557",
+        "scripts/run_gen_test_data.sh": "5a368c8f8c1863436b879112907aad3009f94f27810d01ddd9820b4cf662ce91",
+        "scripts/run_gen_training_data.sh": "05408e7e95cef3391f33f73d032965c95184dc9e29a6a419054935f82bbd6cbb",
+        "scripts/run_training.sh": "b7f20446d017d4a5d241a2517d337f2ba39290491175bc12e109541675e49f88",
+        "scripts/vllm/launch/file_proxy_server.py": "c8a0b01f419829c8662ff26a1e3720668a03a3873c695e737244178ca43902c5",
+        "scripts/vllm/launch/launch_vllm.py": "08fd7929f1e1c964e66da0013ec16fb4c5ebf580e32564bfc4590f7e2fbaf42e",
+        "scripts/vllm/launch/run_file_proxy_server.sh": "58596e42e4b6617bb87d6e89a29b6d568ac7719f9ee86b545426efcee1c68d67",
+        "scripts/vllm/launch/serve_qwen.sh": "48e53c4d3d0d3d0dd9db0827757fe229cce0fbc18a847c9704547ee51ed0317d",
+        "train/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "train/data.py": "f7a25ead9a1ca4cb200eb95830fdd5199d05c0132a9630d72d7a7b26ad670d49",
+        "train/models/defender/__init__.py": "ff94c3a2e7aaeab2c1d12d08cb9c5cb8c66ccab9b0ed12065d7bf9bab82e0212",
+        "train/models/defender/gat_with_attr_conv.py": "5622daf36ce0598423aae1f0bdd869e7192d0ec239226e82cbb1a4daf66e4b25",
+        "train/models/defender/model.py": "8dba6d3e6d75601a524a723a1b081b71cd87d104b884264dfb7daed0712238ed",
+        "train/models/sentence-transformers/__init__.py": "571585b16cee2cbd13b34fbccc69b0f0bd3075d7fa985e9173ac7b21d8ee9d79",
+        "train/test.py": "fd17c68f93007540f1167187d8e4ad580bedd18324771faa99bf672378b0d0a9",
+        "train/trainer.py": "cf59b53e37580d9c60eb7d02d05065bbdc8456bf82075df2ac7d8cb21887b1b2",
+        "utils/__init__.py": "259892de854dde923413bedc8531646d968709f232792552e4618a7c09cfd6de",
+        "utils/embedding_utils.py": "ebf8f2b7920b28e135525d6d7a7dd52c5d3aaec8fd87bec127d5d91d2aebc688",
+        "utils/evaluation_utils.py": "fad8e9b0dd735717280e4c15024a8d91624c55e437100c6f2c9b6c49c2662555",
+        "utils/graph_utils.py": "abb3e3c8b165abde0f61f2da7da79d5eb08a5738af98912a2c688cad13cb28de",
+        "utils/llm_client/__init__.py": "728a5f31e17d7a846ca65e0a757b30306f980f4e40548fa9ab9212cb910a4d8d",
+        "utils/llm_client/factory.py": "c6781f14ceec9c4b31b3f78d73794cadf747fb7beab836c71d3ccf6acb98cc27",
+        "utils/llm_client/file_proxy.py": "c8283586b61f876b15aa14c178efa28b59580a1d5948f50da3c0158695e62cc5",
+        "utils/llm_client/local.py": "d40a94f235ce674805a5b1cc83d78370c1cbad2f8a6de095870b94e84be025db",
+        "utils/llm_client/vllm.py": "64f44ffd5f7eee583ee206746360853548b9cd104fc4be02fc856d256827a745",
+        "utils/proxy_manager.py": "b627276cd454bce5bd11db912e10ccad1681cb2a44f1f227b6cbb02f3f9a60f4",
+        "utils/text_utils.py": "b934ab2d1658ead40ada0a70efb31e9d338df75ddcac4ee31292f8574432daca",
+        "utils/tool_utils.py": "e7289036e35977c6989571481f4af31db2b1f30edbd5cecf9254d807487fe946"
+      },
+      "effective_training": {
+        "hidden_dim": 1024,
+        "heads": 8,
+        "layers": 2,
+        "dropout": 0.2,
+        "out_channels": 2,
+        "guard": "ours",
+        "turn_ranges": [
+          [
+            1,
+            1
+          ],
+          [
+            2,
+            2
+          ],
+          [
+            3,
+            3
+          ],
+          [
+            4,
+            5
+          ]
+        ],
+        "alpha": 1.0,
+        "beta": 0.5,
+        "weight_decay": 0.0002,
+        "optimizer": "Adam",
+        "scheduler": {
+          "name": "CosineAnnealingLR",
+          "T_max": 10,
+          "eta_min": 1e-05
+        },
+        "selection": "sum of malicious and infection validation accuracy",
+        "validation_branch_aggregation": false,
+        "split": "first 80% rows training, last 20% validation"
+      }
+    },
+    "guardian": {
+      "repository": "https://github.com/JialongZhou666/GUARDIAN",
+      "revision": "60d7b8b6a9e64b87134b1078bfbba0f1e7b5b50b",
+      "files": {
+        "code/communication-targeted_error_injection_and_propagation/model_static.py": "7bd52a0365dcdd9716bced9aba21c0974b17b5bac6d88e66528c6f58606bda85",
+        "code/communication-targeted_error_injection_and_propagation/model_temporal_gib.py": "9b7c0a956a69f085251700a3fadc857736f24985ff0c49f30e66788635fda0bd",
+        "code/communication-targeted_error_injection_and_propagation/utils.py": "feb3577beef146ad1a7d15aec6af72f1048718e4c2a2a069d2f3d8000c62ebca",
+        "code/communication-targeted_error_injection_and_propagation/LLMLP_communication_attack.py": "fc4c2dcbcea29f046a9bee2f70229112f80c8f3639d5ce7f6bd59fbfaa3c5674",
+        "code/communication-targeted_error_injection_and_propagation/LLM_Neuron_communication_attack.py": "b75141808858368d8dafe8cbcac7403306368abc02b4166d66fbf6758219c3cd"
+      },
+      "effective_detection": {
+        "detector_checkpoint_required": false,
+        "epochs_per_round": 20,
+        "learning_rate": 0.001,
+        "device": "cpu",
+        "graph": "complete directed without self-loops among active agents",
+        "text": "released parse_single_choice result",
+        "static": {
+          "hid_dim": 128,
+          "num_gnn_layers": 2,
+          "feature_weight": 0.3
+        },
+        "temporal": {
+          "hid_dim": 64,
+          "num_gnn_layers": 2,
+          "num_transformer_layers": 2,
+          "nhead": 4,
+          "feature_weight": 0.3,
+          "beta": 0.001
+        },
+        "pruning": "unconditional max-anomaly active node"
+      }
+    }
+  },
+  "assets": {
+    "bert_base_uncased": {
+      "repository": "google-bert/bert-base-uncased",
+      "revision": "86b5e0934494bd15c9632b12f734a8a67f723594",
+      "files": {
+        "config.json": "7160e1553ad2ca51d8c1cb066be533db31826e12d173824c1bb0cb1a4f187d20",
+        "tokenizer.json": "ce64fce797c24f68df90b40a3f74f579b336a493db14bd583fd520ea0d8c9a98",
+        "tokenizer_config.json": "a025160ef0431f1a392f6f050c1310f4c5d9fb6f275932dbccba73c4d214bf10",
+        "vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+        "model.safetensors": "68d45e234eb4a928074dfd868cead0219ab85354cc53d20e772753c6bb9169d3"
+      }
+    },
+    "csqa_train": {
+      "repository": "tau/commonsense_qa",
+      "revision": "94630fe30dad47192a8546eb75f094926d47e155",
+      "file": "data/train-00000-of-00001.parquet",
+      "sha256": "b0449767ed986bfc2ca52b1244a46ef12f732756727f3cb0a4ab69ac8b3d282b"
+    }
+  }
+}
