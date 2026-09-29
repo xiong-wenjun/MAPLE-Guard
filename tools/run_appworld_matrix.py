@@ -15,6 +15,8 @@ import subprocess
 import sys
 import time
 
+import yaml
+
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from maple_guard.benchmarks.benchmark_bundle import load_bundle
@@ -23,6 +25,36 @@ MAIN=("no_defense_memrl","maple_guard","provenance_acl","agentsafe_full","infa_g
 MECHANISM=("maple_guard_retrieval_only","piguard_lifecycle","agentxposed_full_kick")
 IDENTITY_AUDIT=("inspector",)
 GATES=("maple_guard_no_write","maple_guard_no_retrieval","maple_guard_no_promotion","maple_guard_no_cross_agent")
+# Canonical names implemented by maple_guard_core.build_adj_matrix and run_mmlu's CLI.
+TOPOLOGIES=("star","chain","tree","full","random")
+TOPOLOGY_ALIASES={"fully-connected":"full","complete":"full"}
+
+def canonical_topology(value):
+    value=TOPOLOGY_ALIASES.get(value,value)
+    if value not in TOPOLOGIES:
+        raise ValueError("Unsupported communication topology: "+value)
+    return value
+
+def freeze_configs(run_root, topologies):
+    """Freeze only inside a fresh matrix root; preserve existing template bytes."""
+    snapshots={}
+    for topology in topologies:
+        source=ROOT/f"configs/appworld_{topology}.yaml"
+        if not source.exists():source=ROOT/"configs/appworld_star.yaml"
+        raw=source.read_bytes()
+        config=yaml.safe_load(raw)
+        derived=config["communication"]["topology"]!=topology
+        if derived:
+            config["communication"]["topology"]=topology
+            frozen=yaml.safe_dump(config,sort_keys=False).encode()
+        else:
+            frozen=raw
+        path=run_root/f"appworld_{topology}.snapshot.yaml"
+        with path.open("xb") as handle:handle.write(frozen)
+        snapshots[topology]={"path":str(path.resolve()),"sha256":hashlib.sha256(frozen).hexdigest(),
+                             "source":str(source.relative_to(ROOT)),"source_sha256":hashlib.sha256(raw).hexdigest(),
+                             "communication_topology":topology,"derived":derived}
+    return snapshots
 
 def arguments():
     p=argparse.ArgumentParser(description=__doc__)
@@ -35,6 +67,8 @@ def arguments():
     p.add_argument("--phase",choices=("smoke","pilot"),default="smoke")
     p.add_argument("--methods",nargs="+",default=list(MAIN+MECHANISM+IDENTITY_AUDIT))
     p.add_argument("--seeds",nargs="+",type=int,default=[42])
+    p.add_argument("--topologies",nargs="+",type=canonical_topology,choices=TOPOLOGIES,default=["star"],
+                   help="Communication graphs; fully-connected and complete normalize to full")
     p.add_argument("--tasks",type=int,default=4)
     p.add_argument("--workers",type=int,default=2)
     p.add_argument("--run-root",required=True)
@@ -45,7 +79,11 @@ def arguments():
     p.add_argument("--infa-checkpoint",default="")
     p.add_argument("--minilm-model",default="")
     p.add_argument("--guardian-source",default="")
-    return p.parse_args()
+    args=p.parse_args()
+    for name in ("seeds","topologies","methods"):
+        values=getattr(args,name)
+        if len(values)!=len(set(values)):p.error("Duplicate "+name+" would collide in run state")
+    return args
 
 def extras(args, method, run_id):
     refs=Path("/mnt/public/data/wj/baseline-references")
@@ -84,15 +122,18 @@ def source_fingerprint():
                 digest.update(str(path.relative_to(ROOT)).encode());digest.update(path.read_bytes())
     return digest.hexdigest()
 
-def build_job(args, method, seed, services):
+def build_job(args, method, seed, services, topology="star", config_snapshot=None):
     if method not in MAIN+MECHANISM+GATES+IDENTITY_AUDIT: raise ValueError("Unrecognized experiment method: "+method)
     if args.profile=="paper-code" and method not in ("maple_guard","no_defense_memrl"):
         raise ValueError("Paper-code bridge currently restricted to original MAPLE and No Defense")
+    topology=canonical_topology(topology)
     task=services[args.task_service];judge=services[args.judge_service];embedding=services["embedding"]
-    run_id=f"{args.phase}_{args.profile}_{args.backbone}_{method}_s{seed}"
+    legacy_run_id=f"{args.phase}_{args.profile}_{args.backbone}_{method}_s{seed}"
+    run_id=f"{args.phase}_{args.profile}_{args.backbone}_{method}_{topology}_s{seed}"
+    config_path=config_snapshot["path"] if config_snapshot else str(ROOT/"configs/appworld_star.yaml")
     run_dir=Path(args.run_root)/run_id
     extra,blocked=extras(args,method,run_id)
-    cmd=[sys.executable,"-B",str(ROOT/"tools/run_instrumented.py"),"maple_guard.run_appworld","--config","configs/appworld_star.yaml",
+    cmd=[sys.executable,"-B",str(ROOT/"tools/run_instrumented.py"),"maple_guard.run_appworld","--config",config_path,"--communication-topology",topology,
          "--benchmark-bundle",str(Path(args.bundle).resolve()),"--method",method,"--tasks",str(args.tasks),
          "--seed",str(seed),"--agents","8","--rounds","3",
          "--chat-base-url",task["base_url"],"--chat-model",task["model"],
@@ -110,7 +151,9 @@ def build_job(args, method, seed, services):
                 "--asr-metric","target_hit","--chat-max-tokens","512"]
     if args.phase=="smoke": cmd+=["--warmup-tasks","0","--malicious-activation-rate","0.25"]
     return {"run_id":run_id,"method":method,"table_role":"main" if method in MAIN else ("identity_audit" if method in IDENTITY_AUDIT else "mechanism"),
-            "seed":seed,"phase":args.phase,"profile":args.profile,"directory":str(run_dir),
+            "seed":seed,"topology":topology,"phase":args.phase,"profile":args.profile,"directory":str(run_dir),
+            # A lookup hint only: reuse still requires matching dataset, algorithm flags and assets.
+            "legacy_run_id":legacy_run_id if topology=="star" else None,"config_snapshot":config_snapshot,
             "command":cmd+extra,"status":"blocked" if blocked else "prepared","reason":blocked}
 
 def save(path,value):
@@ -180,25 +223,28 @@ def main():
     if args.backbone=="qwen" and "qwen" not in model:raise ValueError("Qwen arm requires Qwen service")
     if "qwen3.5" not in judge["model"].lower():raise ValueError("Freeze Qwen3.5 judge across both backbones")
     _,data_manifest=load_bundle(args.bundle,"appworld")
-    run_root=Path(args.run_root)
+    run_root=Path(args.run_root).resolve()
+    args.run_root=str(run_root)
     if run_root.exists():raise ValueError("Fresh run root required; never reuse memory across experiments")
     run_root.mkdir(parents=True)
-    jobs=[build_job(args,method,seed,services) for seed in args.seeds for method in args.methods]
+    snapshots=freeze_configs(run_root,args.topologies)
+    jobs=[build_job(args,method,seed,services,topology,snapshots[topology])
+          for seed in args.seeds for topology in args.topologies for method in args.methods]
     public={name:{k:v for k,v in service.items() if k in ("base_url","model","source_host")} for name,service in services.items()}
     manifest={"evaluation_protocol":"appworld_action_selection_proxy","native_execution":False,
               "phase":args.phase,"profile":args.profile,"task_count":args.tasks,
+              "seeds":args.seeds,"topologies":args.topologies,"config_snapshots":snapshots,
               "repository_commit":subprocess.check_output(["git","rev-parse","HEAD"],cwd=ROOT,text=True).strip(),
               "source_sha256":source_fingerprint(),"python":sys.executable,
               "runtime_versions":{name:importlib.metadata.version(name) for name in
                   ("torch","transformers","numpy","requests") if importlib.util.find_spec(name)},
               "dataset":data_manifest,"services":public,"jobs":jobs,
-              "limitations":["One star topology/seed pilot is not the original three-topology 15-run table.",
+              "limitations":["Prepared matrix axes do not establish completed seed/topology coverage; report only validated runs.",
                              "Reference-outcome memory feedback remains enabled and shared across strict arms.",
                              "Provided specs only: no native AppWorld tool execution or database evaluation.",
                              "Smoke phase changes warmup/poison rate and is not a benchmark result."]}
     save(run_root/"matrix.json",manifest)
-    (run_root/"appworld_star.snapshot.yaml").write_bytes((ROOT/"configs/appworld_star.yaml").read_bytes())
-    print(json.dumps({"run_root":str(run_root),"jobs":[{k:j[k] for k in ("method","status","reason")} for j in jobs]},ensure_ascii=False),flush=True)
+    print(json.dumps({"run_root":str(run_root),"jobs":[{k:j[k] for k in ("method","seed","topology","status","reason")} for j in jobs]},ensure_ascii=False),flush=True)
     if not args.execute:return 0
     try:
         manifest["service_verification"]=validate_services(services,[args.task_service,args.judge_service,"embedding"])
