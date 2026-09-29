@@ -151,6 +151,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--official-defense-gnn-threshold", type=float, default=float(cfg_get(cfg, "defense.official.threshold", os.environ.get("OFFICIAL_DEFENSE_GNN_THRESHOLD", 0.5))))
     p.add_argument("--official-defense-gnn-device", default=cfg_get(cfg, "defense.official.device", os.environ.get("OFFICIAL_DEFENSE_GNN_DEVICE", "cpu")))
     p.add_argument("--official-defense-guardian-code-dir", default=cfg_get(cfg, "defense.official.guardian_code_dir", ""))
+    p.add_argument("--official-defense-guardian-bert-dir", default=cfg_get(cfg, "defense.official.guardian_bert_dir", ""), help="Pinned BERT directory for the GUARDIAN detector.")
+    p.add_argument("--official-defense-guardian-profile", choices=("host_graph", "released_detector"), default=cfg_get(cfg, "defense.official.guardian_profile", "host_graph"), help="GUARDIAN graph and detector protocol.")
+    p.add_argument("--official-defense-guardian-epochs", type=int, default=cfg_get(cfg, "defense.official.guardian_epochs", None), help="Online training epochs per round; released_detector requires 20.")
     p.add_argument("--disable-chat-thinking", action=argparse.BooleanOptionalAction, default=bool(cfg_get(cfg, "llm.disable_thinking", False)))
 
     p.add_argument("--memory-backend", default=cfg_get(cfg, "memory.backend", "memrl"), choices=["memrl"])
