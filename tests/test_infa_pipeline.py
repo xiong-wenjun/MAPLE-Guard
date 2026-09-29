@@ -186,7 +186,7 @@ class InfaPipelineTests(unittest.TestCase):
         patcher=patch.object(implementation(),"source_fingerprint",return_value="fixture-source-hash")
         patcher.start(); self.addCleanup(patcher.stop)
         self.journal_patch=patch("tools.infa_generation_recovery.summarize_journal",
-            side_effect=lambda directory,count:{"accepted_responses":count,"journal_sha256":"fixture-journal-hash",
+            side_effect=lambda directory,count,*policy:{"accepted_responses":count,"journal_sha256":"fixture-journal-hash",
                                                 "accepted_token_budgets":{1024:count}})
         self.journal_summary=self.journal_patch.start();self.addCleanup(self.journal_patch.stop)
 

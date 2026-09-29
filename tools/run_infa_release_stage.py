@@ -110,6 +110,10 @@ def run_stage(recipe, stage, grid_index, heldout, services="", service="", proto
     if protocol_check and stage!="generate":
         raise ValueError("Protocol checks cannot enter embedding or training")
     if stage=="generate":
+        if recipe.get("generation_profile")=="qwen_no_thinking_released_budget":
+            policy=recipe.get("generation_recovery",{})
+            if policy.get("token_budgets")!=[1024] or policy.get("accepted_finish_reasons")!=["stop","length"]:
+                raise ValueError("Released-budget profile requires fixed 1024 stop/length policy")
         if grid_index not in range(20):raise ValueError("Grid index must be 0..19")
         selected=recipe["generation"][grid_index]
         argv=list(selected["argv"]);seed=selected["seed"]
@@ -210,7 +214,7 @@ def run_stage(recipe, stage, grid_index, heldout, services="", service="", proto
         report["output"]=str(output);report["sha256"]=r.sha256(output)
         if recipe.get("generation_recovery"):
             from tools.infa_generation_recovery import summarize_journal
-            report["generation_integrity"]=summarize_journal(report["recovery_journal"],(2 if protocol_check else 40)*8*4)
+            report["generation_integrity"]=summarize_journal(report["recovery_journal"],(2 if protocol_check else 40)*8*4,recipe["generation_recovery"])
     elif stage in ("merge","embed"):
         output=(formal/"dataset.json") if stage=="merge" else Path(recipe["training"]["argv"][recipe["training"]["argv"].index("--dataset_path")+1])
         report["output"]=str(output);report["sha256"]=r.sha256(output)

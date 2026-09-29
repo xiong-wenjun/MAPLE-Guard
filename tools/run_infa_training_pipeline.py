@@ -133,8 +133,12 @@ class Pipeline:
                 any(g["argv"][g["argv"].index("--samples") + 1] != "40" for g in generation) or
                 train[train.index("--epochs") + 1] != "50"):
             raise ValueError("Require the pinned 20 x 40 generation grid and 50 epochs")
-        if self.recipe.get("generation_profile") != "qwen_no_thinking_recover":
+        if self.recipe.get("generation_profile") not in ("qwen_no_thinking_recover", "qwen_no_thinking_released_budget"):
             raise ValueError("Controller requires the declared resumable generation profile")
+        if self.recipe["generation_profile"]=="qwen_no_thinking_released_budget":
+            policy=self.recipe.get("generation_recovery",{})
+            if policy.get("token_budgets")!=[1024] or policy.get("accepted_finish_reasons")!=["stop","length"]:
+                raise ValueError("Released-budget profile requires fixed 1024 stop/length policy")
         if read_json(self.job / "maple-reproduction.json")["recipe"] != self.recipe:
             raise ValueError("Recipe differs from prepared INFA source")
         source_files = self.recipe.get("source_files", {})
@@ -253,10 +257,14 @@ class Pipeline:
                 journal = self.results / (label + "-responses")
                 if Path(row.get("recovery_journal", "")).absolute() != journal.absolute():
                     raise ValueError("Generation journal path differs: " + label)
-                integrity = summarize_journal(journal, count * 8 * 4)
+                integrity = summarize_journal(journal, count * 8 * 4, self.recipe.get("generation_recovery"))
                 declared = row.get("generation_integrity", {})
                 if any(declared.get(key) != integrity[key] for key in ("accepted_responses", "journal_sha256")):
                     raise ValueError("Generation journal hash/count differs: " + label)
+                if self.recipe.get("generation_profile")=="qwen_no_thinking_released_budget":
+                    for key in ("accepted_finish_reasons", "import_provenance_sha256"):
+                        if declared.get(key)!=integrity.get(key):
+                            raise ValueError("Generation response/import provenance differs: " + label)
             elif stage == "merge":
                 if output != (formal / "dataset.json").resolve():
                     raise ValueError("Unexpected merged dataset output")
