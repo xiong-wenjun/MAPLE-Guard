@@ -13,12 +13,15 @@ MEMORY_METHODS = ("provenance_acl", "maple_guard_retrieval_only", "amemguard_ful
 MATCHED_METHODS = ("maple_guard", "maple_guard_retrieval_only")
 
 def model_clients(args):
-    import urllib.request
+    from .amemguard_transport import max_attempts_from_environment, request_json
+    from .full_runtime import _positive_judge_timeout
+    configured_timeout = getattr(args, "full_judge_timeout", None)
+    judge_timeout = 120.0 if configured_timeout is None else _positive_judge_timeout(configured_timeout)
+    max_attempts = max_attempts_from_environment()
     def request(base, path, body, key):
-        headers={"Content-Type":"application/json"}
-        if key: headers["Authorization"]="Bearer "+key
-        req=urllib.request.Request(base.rstrip("/")+path, data=json.dumps(body).encode(),headers=headers)
-        with urllib.request.urlopen(req,timeout=120) as response: return json.load(response)
+        return request_json(base, path, body, key,
+                            timeout=judge_timeout if path == "/chat/completions" else 120.0,
+                            max_attempts=max_attempts)
     def judge(messages):
         base=getattr(args,"full_judge_base_url","") or getattr(args,"chat_base_url","")
         model=getattr(args,"full_judge_model","") or getattr(args,"chat_model","")

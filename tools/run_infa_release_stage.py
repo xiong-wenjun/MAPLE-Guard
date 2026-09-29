@@ -14,19 +14,22 @@ import random
 import runpy
 import shutil
 import sys
+import tempfile
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from evaluate.defense_methods import reproduction as r
 
-def install_api_audit(path, request_overrides=None, recovery_policy=None, cache_dir=None):
+def install_api_audit(path, request_overrides=None, recovery_policy=None, cache_dir=None, replay_only=False):
     """Observe the upstream request unchanged and fail on incomplete generations."""
     from openai.resources.chat.completions import AsyncCompletions
     original = AsyncCompletions.create
     if recovery_policy:
         from tools.infa_generation_recovery import make_audited_create
         AsyncCompletions.create = make_audited_create(
-            original, path, request_overrides, recovery_policy, cache_dir)
+            original, path, request_overrides, recovery_policy, cache_dir, replay_only=replay_only)
         return
+    if replay_only:
+        raise ValueError("Cache-only recovery requires a declared response journal policy")
     overrides = request_overrides or {}
     async def audited(self, *args, **kwargs):
         if set(kwargs) & set(overrides):
@@ -130,8 +133,6 @@ def run_stage(recipe, stage, grid_index, heldout, services="", service="", proto
             argv[argv.index("--samples")+1]="2"
             argv[argv.index("--save_dir")+1]=str(job/"protocol-check")
             destination=job/"protocol-check/PI/csqa/train"
-        if list(destination.glob(f"*-num_attackers_{selected['attackers']}-sparsity_{selected['sparsity']}.json")):
-            raise FileExistsError("This grid output already exists; inspect it before rerunning")
     else:
         argv=list(recipe[{"merge":"merge","embed":"embedding","train":"training"}[stage]]["argv"])
         seed=recipe["reproduction_seed"];label=stage
@@ -163,70 +164,101 @@ def run_stage(recipe, stage, grid_index, heldout, services="", service="", proto
                     raise ValueError("Training feature pickle differs from the verified embedding output")
     logdir=job/"stage-results";logdir.mkdir(exist_ok=True)
     marker=logdir/(label+".json")
-    if marker.exists():raise FileExistsError("Stage has already completed")
     # A resumed grid must never have two writers, even if separate controllers race.
     import fcntl
-    stage_lock=(logdir/(label+".lock")).open("a")
-    fcntl.flock(stage_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-    # Each invocation runs in its own process: global RNG/cwd changes cannot affect evaluations.
-    import numpy as np
-    import torch
-    torch.set_num_threads(2)
-    random.seed(seed);np.random.seed(seed);torch.manual_seed(seed)
-    before=set(destination.glob("*.json")) if destination.exists() else set()
-    old=Path.cwd()
-    if stage=="generate":
-        install_api_audit(logdir/(label+"-api.jsonl"), recipe["request_overrides"],
-                          recipe.get("generation_recovery"), logdir/(label+"-responses"))
-    try:
-        os.chdir(job);prepare_native_imports(job);sys.argv=argv
-        with (logdir/(label+".log")).open("a" if stage=="generate" and recipe.get("generation_recovery") else "x") as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
-            runpy.run_path(str(job/argv[0]),run_name="__main__")
-    finally:
-        os.chdir(old)
-    import importlib.metadata
-    versions={}
-    for distribution in ("torch","torch-geometric","torch-scatter","transformers",
-                         "sentence-transformers","openai","datasets","pyarrow","numpy"):
-        try: versions[distribution]=importlib.metadata.version(distribution)
-        except importlib.metadata.PackageNotFoundError: versions[distribution]=None
-    imported={}
-    for name in ("evaluate.evaluate_output","MAS.agents","train.models.defender.model"):
-        module=sys.modules.get(name)
-        if module is not None:
-            path=Path(module.__file__).resolve()
-            if not path.is_relative_to(job.resolve()):
-                raise ValueError(f"Native import escaped the pinned source: {name}")
-            imported[name]=str(path)
-    report={"runtime_versions":versions,"native_import_paths":imported,"stage":stage,"status":"completed","protocol_check":protocol_check,
-            "source_revision":recipe["source_revision"],"seed":seed,
-            "generator_model":recipe["generator_model"],"model_substitution":recipe["model_substitution"],
-            "generation_profile":recipe["generation_profile"],"request_overrides":recipe["request_overrides"],
-            "author_checkpoint":False,
-            "generation_recovery":recipe.get("generation_recovery"),
-            "recovery_journal":str(logdir/(label+"-responses")) if stage=="generate" and recipe.get("generation_recovery") else None}
-    if stage=="generate":
-        after=set(destination.glob("*.json"))-before
-        if len(after)!=1:raise ValueError("Expected exactly one generated graph file")
-        output=after.pop()
-        report["validation"]=r.validate_infa_dialogues(json.loads(output.read_text()),
-                    r.heldout_questions(heldout),2 if protocol_check else 40)
-        report["output"]=str(output);report["sha256"]=r.sha256(output)
-        if recipe.get("generation_recovery"):
-            from tools.infa_generation_recovery import summarize_journal
-            report["generation_integrity"]=summarize_journal(report["recovery_journal"],(2 if protocol_check else 40)*8*4,recipe["generation_recovery"])
-    elif stage in ("merge","embed"):
-        output=(formal/"dataset.json") if stage=="merge" else Path(recipe["training"]["argv"][recipe["training"]["argv"].index("--dataset_path")+1])
-        report["output"]=str(output);report["sha256"]=r.sha256(output)
-    else:
-        weights=list((job/"checkpoints").rglob("*.pth"))
-        if not weights:raise ValueError("Training produced no checkpoint")
-        report["checkpoints"]={str(p):r.sha256(p) for p in weights}
-        report["evaluation_ready"]=False
-        report["next_gate"]="strict native checkpoint load and held-out protocol tasks"
-    from tools.infa_generation_recovery import atomic_json
-    atomic_json(marker,report)
-    return report
+    with (logdir/(label+".lock")).open("a") as stage_lock:
+        fcntl.flock(stage_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        # Each invocation runs in its own process: global RNG/cwd changes cannot affect evaluations.
+        import numpy as np
+        import torch
+        torch.set_num_threads(2)
+        random.seed(seed);np.random.seed(seed);torch.manual_seed(seed)
+        if marker.exists():raise FileExistsError("Stage has already completed")
+        existing_output=None
+        if stage=="generate":
+            pattern=f"*-num_attackers_{selected['attackers']}-sparsity_{selected['sparsity']}.json"
+            existing=list(destination.glob(pattern))
+            if len(existing)>1:raise ValueError("Multiple outputs exist for this generation grid")
+            existing_output=existing[0] if existing else None
+            if existing_output:
+                if not recipe.get("generation_recovery"):
+                    raise ValueError("Existing output recovery requires a complete response journal")
+                from tools.infa_generation_recovery import summarize_journal
+                summarize_journal(logdir/(label+"-responses"),(2 if protocol_check else 40)*8*4,recipe["generation_recovery"])
+                r.validate_infa_dialogues(json.loads(existing_output.read_text()),r.heldout_questions(heldout),2 if protocol_check else 40)
+            # Only storage is adapted. Native graph sampling, model requests and labels stay unchanged.
+            workspaces=logdir/"generation-workspaces";workspaces.mkdir(exist_ok=True)
+            workspace=Path(tempfile.mkdtemp(prefix=label+"-",dir=workspaces))
+            native_destination=workspace/"PI/csqa/train"
+            native_destination.mkdir(parents=True,exist_ok=True)
+            argv[argv.index("--save_dir")+1]=str(workspace)
+        old=Path.cwd()
+        if stage=="generate":
+            install_api_audit(logdir/(label+"-api.jsonl"), recipe["request_overrides"],
+                              recipe.get("generation_recovery"), logdir/(label+"-responses"), replay_only=existing_output is not None)
+        try:
+            os.chdir(job);prepare_native_imports(job);sys.argv=argv
+            with (logdir/(label+".log")).open("a" if stage=="generate" and recipe.get("generation_recovery") else "x") as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
+                runpy.run_path(str(job/argv[0]),run_name="__main__")
+        finally:
+            os.chdir(old)
+        import importlib.metadata
+        versions={}
+        for distribution in ("torch","torch-geometric","torch-scatter","transformers",
+                             "sentence-transformers","openai","datasets","pyarrow","numpy"):
+            try: versions[distribution]=importlib.metadata.version(distribution)
+            except importlib.metadata.PackageNotFoundError: versions[distribution]=None
+        imported={}
+        for name in ("evaluate.evaluate_output","MAS.agents","train.models.defender.model"):
+            module=sys.modules.get(name)
+            if module is not None:
+                path=Path(module.__file__).resolve()
+                if not path.is_relative_to(job.resolve()):
+                    raise ValueError(f"Native import escaped the pinned source: {name}")
+                imported[name]=str(path)
+        report={"runtime_versions":versions,"native_import_paths":imported,"stage":stage,"status":"completed","protocol_check":protocol_check,
+                "source_revision":recipe["source_revision"],"seed":seed,
+                "generator_model":recipe["generator_model"],"model_substitution":recipe["model_substitution"],
+                "generation_profile":recipe["generation_profile"],"request_overrides":recipe["request_overrides"],
+                "author_checkpoint":False,
+                "generation_recovery":recipe.get("generation_recovery"),
+                "recovery_journal":str(logdir/(label+"-responses")) if stage=="generate" and recipe.get("generation_recovery") else None}
+        if stage=="generate":
+            generated=list(native_destination.glob(pattern))
+            if len(generated)!=1:raise ValueError("Expected exactly one generated graph file for this grid")
+            native_output=generated[0]
+            generated_rows=json.loads(native_output.read_text())
+            report["validation"]=r.validate_infa_dialogues(generated_rows,
+                        r.heldout_questions(heldout),2 if protocol_check else 40)
+            if recipe.get("generation_recovery"):
+                from tools.infa_generation_recovery import summarize_journal
+                report["generation_integrity"]=summarize_journal(report["recovery_journal"],(2 if protocol_check else 40)*8*4,recipe["generation_recovery"])
+            report["generation_execution"]={"effective_argv":argv,"isolated_output":str(native_output),
+                "storage_adaptation":"per-grid private output directory; native recipe otherwise unchanged"}
+            if existing_output:
+                if json.loads(existing_output.read_text())!=generated_rows:
+                    raise ValueError("Existing grid output differs from cache-only native replay")
+                output=existing_output
+                report["output_recovery"]={"verification":"cache-only native replay matched all dialogue fields",
+                    "preserved_output_sha256":r.sha256(output),"replayed_output_sha256":r.sha256(native_output)}
+            else:
+                destination.mkdir(parents=True,exist_ok=True)
+                output=destination/native_output.name
+                # A hard link publishes the complete validated file atomically without replacing anything.
+                os.link(native_output,output)
+            report["output"]=str(output);report["sha256"]=r.sha256(output)
+        elif stage in ("merge","embed"):
+            output=(formal/"dataset.json") if stage=="merge" else Path(recipe["training"]["argv"][recipe["training"]["argv"].index("--dataset_path")+1])
+            report["output"]=str(output);report["sha256"]=r.sha256(output)
+        else:
+            weights=list((job/"checkpoints").rglob("*.pth"))
+            if not weights:raise ValueError("Training produced no checkpoint")
+            report["checkpoints"]={str(p):r.sha256(p) for p in weights}
+            report["evaluation_ready"]=False
+            report["next_gate"]="strict native checkpoint load and held-out protocol tasks"
+        from tools.infa_generation_recovery import atomic_json
+        atomic_json(marker,report)
+        return report
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)

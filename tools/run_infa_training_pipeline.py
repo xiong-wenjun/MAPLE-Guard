@@ -55,12 +55,13 @@ def require_hash(path, expected):
         raise ValueError("Artifact hash mismatch: " + str(path))
 
 
-def source_fingerprint():
+def source_fingerprint(root=None):
+    root = ROOT if root is None else Path(root)
     digest = hashlib.sha256()
     for folder in ("maple_guard", "evaluate", "configs", "prompts", "tools"):
-        for path in sorted((ROOT / folder).rglob("*")):
+        for path in sorted((root / folder).rglob("*")):
             if path.is_file() and path.suffix in (".py", ".yaml", ".json", ".sh"):
-                digest.update(str(path.relative_to(ROOT)).encode())
+                digest.update(str(path.relative_to(root)).encode())
                 digest.update(path.read_bytes())
     return digest.hexdigest()
 
@@ -107,13 +108,49 @@ class Pipeline:
             self._save()
 
     def _inputs(self):
-        return {"source_root":str(ROOT), "source_sha256":source_fingerprint(),
+        return {**({"resume_from":str(Path(self.args.resume_from).resolve())}
+                  if getattr(self.args,"resume_from",None) else {}),"source_root":str(ROOT), "source_sha256":source_fingerprint(),
             "recipe_path":str(self.recipe_path), "recipe_sha256":sha256(self.recipe_path),
             "heldout":{str(Path(p).resolve()):sha256(p) for p in self.args.heldout},
             "bundle":str(Path(self.args.bundle).resolve()), "bundle_sha256":sha256(self.args.bundle),
             "services_path":str(Path(self.args.services).resolve()), "services_sha256":sha256(self.args.services),
             "generation_services":list(self.args.generation_services),
             "minilm_model":str(Path(self.args.minilm_model).resolve()), "workers":self.args.workers}
+
+    def _migrate_source(self, inputs):
+        """Audit a fresh controller against a stopped predecessor; never edit its history."""
+        previous_root = Path(self.args.resume_from).resolve()
+        if previous_root == self.run_root:
+            raise ValueError("Source migration requires a fresh run root")
+        previous_path = previous_root / "pipeline-state.json"
+        previous = read_json(previous_path)
+        if previous.get("status") not in ("failed", "interrupted") or previous.get("child_pids"):
+            raise ValueError("Source migration requires a stopped predecessor without children")
+        if previous.get("training_completed") or previous.get("evaluations"):
+            raise ValueError("Generation recovery cannot migrate completed training or evaluations")
+        old_inputs = previous["inputs"]
+        unchanged = lambda value: {key:item for key,item in value.items()
+                                   if key not in ("source_root", "source_sha256", "resume_from")}
+        if unchanged(old_inputs) != unchanged(inputs):
+            raise ValueError("Source migration must preserve recipe, services, data and generation settings")
+        if source_fingerprint(old_inputs["source_root"]) != old_inputs["source_sha256"]:
+            raise ValueError("Previous frozen source hash changed")
+        require_hash(previous_root / "recipe.snapshot.json", old_inputs["recipe_sha256"])
+        for label, known in previous.get("stages", {}).items():
+            if not label.startswith("generate-"):
+                raise ValueError("Only generation-stage recovery is supported")
+            require_hash(self.results / (label + ".json"), known["marker_sha256"])
+            if self._validate_marker(label) is None:
+                raise ValueError("Previously verified generation marker missing")
+        self.state["stages"] = dict(previous.get("stages", {}))
+        report = {"schema_version":1, "previous_run_root":str(previous_root),
+            "previous_state_sha256":sha256(previous_path), "previous_inputs":old_inputs,
+            "new_inputs":inputs, "preserved_stages":self.state["stages"],
+            "previous_attempts":previous.get("attempts", {}),
+            "attempt_policy":"new bounded attempts after verified wrapper-source migration; old history retained",
+            "recipe_policy":"byte-identical recipe and native source; only wrapper source may change"}
+        atomic_json(self.run_root / "source-transition.json", report)
+        self.state["source_transition_sha256"] = sha256(self.run_root / "source-transition.json")
 
     def _preflight(self):
         # Preserve audit/retry history even when a new invocation fails preflight.
@@ -163,7 +200,11 @@ class Pipeline:
             self.state = previous
             self.state["child_pids"] = {}
             require_hash(self.snapshot, inputs["recipe_sha256"])
+            if self.state.get("source_transition_sha256"):
+                require_hash(self.run_root / "source-transition.json", self.state["source_transition_sha256"])
         else:
+            if getattr(self.args,"resume_from",None):
+                self._migrate_source(inputs)
             self.snapshot.write_bytes(self.recipe_path.read_bytes())
             self.state["inputs"] = inputs
         self._update(status="running", stage="protocol", error=None, controller_pid=os.getpid(),
@@ -519,6 +560,7 @@ def arguments(argv=None):
     parser.add_argument("--minilm-model",required=True)
     parser.add_argument("--run-root",required=True)
     parser.add_argument("--workers",type=int,choices=(1,2),default=2)
+    parser.add_argument("--resume-from",help="Stopped generation controller to verify when changing frozen wrapper source")
     args = parser.parse_args(argv)
     for field in ("recipe","services","bundle","minilm_model","run_root"):
         setattr(args,field,str(Path(getattr(args,field)).resolve()))

@@ -115,3 +115,103 @@ unique memory IDs: creating a private copy for a different physical holder must
 allocate a new ID. Both admission and retrieval reject conflicting private-ID
 reuse before changing the registry; this prevents reflection under the wrong
 holder. Runtime state version2 stores these bindings and configuration identity.
+
+## Bounded context adaptation (2026-09-29)
+
+The opt-in `--agentsafe-context-policy bounded_recent_v1` is a disclosed host
+adaptation, not a recovered AgentSafe setting. The pinned official `GenHistory`
+concatenates cumulative levels without a token limit; neither that implementation
+nor the inspected v2 paper provides a bounded context or summarization policy.
+The previous MAPLE adapter likewise appended every retained record across tasks,
+on top of host-rendered retrieved memories and current routed peer messages.
+The Qwen pilot stopped after six completed tasks with a target-generation input
+of 33,354 tokens against the deployed 32,768-token context limit. Its holder 0
+sidecar contained 187 active records and 134,601 text characters. This was target
+prompt growth, not a calibration or reflection exception.
+
+The new policy has the following explicit behavior:
+
+- The task/system prompt and current host-provided memory/peer context remain
+  intact. Access checks still run over each retained record. A full text already
+  present in the host prompt, or another selected record with identical text,
+  is not appended again. The hierarchy, owner, permission, quarantine, and
+  review behavior in storage remain intact.
+- New content versions receive a monotonically increasing first-observation
+  sequence per holder. Rereads and reflection do not make an old record newer.
+  Complete records are considered newest first; selected records are rendered
+  chronologically. Independent text counts guide packing, and an exact count
+  of the final full chat template is authoritative. If needed, the oldest
+  selected complete records are deferred until the prompt fits. There is no
+  partial-record truncation, generated summary, or storage eviction.
+- The input budget is the explicitly configured **deployed** context limit minus
+  the actual completion reserve and safety margin. Do not infer this limit from
+  a tokenizer's maximum length: the Qwen `/tokenize` endpoint reports its model
+  configuration limit, which exceeds the deployed `/v1/models` limit.
+- Tokenization uses only local tokenizer assets with the generation prefix and
+  the same thinking template arguments as each request. The explicit content
+  format matches the serving parser: `string` for Qwen/SGLang and `openai`
+  text blocks for Gemma/vLLM. Gemma's template adds a trailing system-text space
+  only for content blocks; this can change token IDs/counts and cannot be modeled
+  as a universal one-token offset. Normalization applies only to the counter;
+  actual generation request messages are unchanged. The loader records file
+  hashes and never falls back to a character estimate. For the released Gemma
+  tokenizer's list-form `extra_special_tokens`, the installed Transformers 4
+  loader suppresses redundant Python attribute registration only after checking
+  that every listed token is already special in `tokenizer.json`; it then checks
+  every native added-token ID is unchanged. The vocabulary and template files
+  are not modified.
+- Reflection partitions **all** of a holder's prior junk into complete-record
+  batches, repeating the candidate and criteria for every batch. It executes
+  every batch and quarantines the candidate if any judgment says junk. This
+  changes the original combined-context judgment: interactions across junk
+  batches are unavailable and the OR rule can alter refusal rates. It is a
+  declared protocol change, not a mathematically equivalent optimization.
+- An oversized task, classification/identity candidate, reflection candidate,
+  or individual junk record fails explicitly before the affected model request.
+  A single history record that cannot fit with the task also produces an
+  explicit error. Tokenizer/template errors propagate. No oversized text is
+  deleted from memory to permit continuation.
+
+Generation traces contain an `agentsafe_context_budget` decision with selected,
+deferred, and duplicate record IDs, exact input/base counts, stored record count,
+completion reserve, safety margin, tokenizer file hashes, and `storage_evictions=0`.
+Reflection decisions identify the context policy and batch count. Guard provenance
+and the runtime sidecar carry the policy; a changed tokenizer/budget cannot reuse
+that sidecar. Criteria, calibrated cosine threshold, frozen criterion vectors,
+identity checks, directional permissions, and review interval are unchanged.
+
+For the replacement pilot, both deployed model limits are 32,768; target reserve
+is 512, judge reserve 4,096, and margin 128, yielding input budgets of 32,128 and
+28,544. Configure each target tokenizer separately, with Qwen as the common judge:
+
+```text
+--agentsafe-context-policy bounded_recent_v1
+--agentsafe-target-tokenizer <local target tokenizer directory>
+--agentsafe-target-context-limit 32768
+--agentsafe-judge-tokenizer /mnt/public/data/wj/models/Qwen3.5-122B-A10B
+--agentsafe-judge-context-limit 32768
+--agentsafe-judge-content-format string
+--agentsafe-context-margin 128
+```
+
+Set `--agentsafe-target-content-format string` for Qwen and `openai` for Gemma.
+The Qwen target directory is `/mnt/public/data/wj/models/Qwen3.5-122B-A10B`.
+The Gemma target directory is `/mnt/public/model/gemma4/31b_dense` (asset revision
+`fcf2302760ae9c6e528a8dbba9dd636e56848237`). The default `full` policy retains
+legacy prompt behavior for other explicitly selected runs.
+
+### Restart boundary
+
+The stopped Qwen/Gemma traces contain 6/7 completed tasks, respectively. Their
+sidecars preserve guard state and the record registry, but not the entire host
+stream state, RNG state, or an atomic task-boundary memory/backend snapshot.
+Qwen's review clock was 20 after only six complete three-round tasks, proving its
+sidecar also contained partially executed task state. Neither old run can be
+resumed exactly from its completed count. Preserve them as failed diagnostics;
+run the changed policy in fresh stores and fresh 200-task traces, with no splicing
+of old results. The existing durable AppWorld task checkpoint implementation is
+restricted to `provenance_acl`; this fix does not extend it to AgentSafe. Another
+interruption would still require a fresh AgentSafe run rather than an asserted
+exact resume. Cumulative reflection cost also continues to grow with stored
+memory; the frozen review interval is not relaxed by this context fix.
+MD'

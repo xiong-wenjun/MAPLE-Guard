@@ -63,6 +63,7 @@ def arguments():
     p.add_argument("--services",required=True,help="0600 credential file; contents never written to manifests")
     p.add_argument("--task-service",default="inference1")
     p.add_argument("--judge-service",default="inference1")
+    p.add_argument("--full-judge-timeout",type=float,default=None,help="Explicit judge transport timeout; leaves generation budgets unchanged.")
     p.add_argument("--backbone",choices=("qwen","gemma31b"),default="qwen")
     p.add_argument("--profile",choices=("paper-code","strict"),default="strict")
     p.add_argument("--phase",choices=("smoke","pilot"),default="smoke")
@@ -80,6 +81,14 @@ def arguments():
     p.add_argument("--agentsafe-profile",choices=("paper_components","paper_v2_adapted"),default="paper_components")
     p.add_argument("--agentsafe-calibration-manifest",default="")
     p.add_argument("--agentsafe-review-interval",type=int,default=1)
+    p.add_argument("--agentsafe-context-policy",choices=("full","bounded_recent_v1"),default="full")
+    p.add_argument("--agentsafe-target-tokenizer",default="")
+    p.add_argument("--agentsafe-target-context-limit",type=int,default=32768)
+    p.add_argument("--agentsafe-judge-tokenizer",default="")
+    p.add_argument("--agentsafe-judge-context-limit",type=int,default=32768)
+    p.add_argument("--agentsafe-context-margin",type=int,default=128)
+    p.add_argument("--agentsafe-target-content-format",choices=("string","openai"),default="string")
+    p.add_argument("--agentsafe-judge-content-format",choices=("string","openai"),default="string")
     p.add_argument("--infa-checkpoint",default="")
     p.add_argument("--infa-source",default="")
     p.add_argument("--minilm-model",default="")
@@ -87,6 +96,12 @@ def arguments():
     p.add_argument("--guardian-bert-dir",default="")
     p.add_argument("--guardian-profile",choices=("host_graph","released_detector"),default="released_detector")
     args=p.parse_args()
+    if args.full_judge_timeout is not None and args.full_judge_timeout <= 0:
+        p.error("--full-judge-timeout must be positive")
+    if args.agentsafe_context_margin < 0:
+        p.error("--agentsafe-context-margin must be nonnegative")
+    if min(args.agentsafe_target_context_limit,args.agentsafe_judge_context_limit) <= 0:
+        p.error("AgentSafe context limits must be positive")
     for name in ("seeds","topologies","methods"):
         values=getattr(args,name)
         if len(values)!=len(set(values)):p.error("Duplicate "+name+" would collide in run state")
@@ -104,7 +119,15 @@ def extras(args, method, run_id):
         return ["--agentsafe-policy-file",args.agentsafe_policy,"--agentsafe-criteria-file",args.agentsafe_criteria,
                 "--agentsafe-threshold",str(args.agentsafe_threshold),
                 "--agentsafe-profile",profile,"--agentsafe-calibration-manifest",calibration,
-                "--agentsafe-review-interval",str(getattr(args,"agentsafe_review_interval",1))],None
+                "--agentsafe-review-interval",str(getattr(args,"agentsafe_review_interval",1)),
+                "--agentsafe-context-policy",getattr(args,"agentsafe_context_policy","full"),
+                "--agentsafe-target-tokenizer",getattr(args,"agentsafe_target_tokenizer",""),
+                "--agentsafe-target-context-limit",str(getattr(args,"agentsafe_target_context_limit",32768)),
+                "--agentsafe-judge-tokenizer",getattr(args,"agentsafe_judge_tokenizer",""),
+                "--agentsafe-judge-context-limit",str(getattr(args,"agentsafe_judge_context_limit",32768)),
+                "--agentsafe-context-margin",str(getattr(args,"agentsafe_context_margin",128)),
+                "--agentsafe-target-content-format",getattr(args,"agentsafe_target_content_format","string"),
+                "--agentsafe-judge-content-format",getattr(args,"agentsafe_judge_content_format","string")],None
     if method=="infa_guard_full":
         if not args.infa_checkpoint:
             return [],"Native dual-head INFA checkpoint missing; supplied G-Safeguard weights retained separately"
@@ -165,6 +188,8 @@ def build_job(args, method, seed, services, topology="star", config_snapshot=Non
          "--out",str(run_dir/"trace.jsonl"),"--log-every","1"]
     if getattr(args, "task_checkpoints", False):
         cmd += ["--task-checkpoint-dir", str(run_dir/"task-checkpoints")]
+    if getattr(args, "full_judge_timeout", None) is not None:
+        cmd += ["--full-judge-timeout", str(float(args.full_judge_timeout))]
     if args.profile=="strict":
         cmd += ["--strict-comparison","--peer-communication","--no-exclude-attackers-from-final-vote",
                 "--no-enable-causal-mir","--benign-shared-promotion-policy","accepted_retrieved_private",
@@ -185,7 +210,21 @@ def build_job(args, method, seed, services, topology="star", config_snapshot=Non
             "criteria_sha256":asset_digest(args.agentsafe_criteria),
             "policy_sha256":asset_digest(args.agentsafe_policy),
             "admission_threshold":args.agentsafe_threshold,
-            "review_interval":getattr(args,"agentsafe_review_interval",1)}}
+            "review_interval":getattr(args,"agentsafe_review_interval",1),
+            "context_policy":getattr(args,"agentsafe_context_policy","full"),
+            "target_tokenizer":getattr(args,"agentsafe_target_tokenizer",""),
+            "target_context_limit":getattr(args,"agentsafe_target_context_limit",32768),
+            "judge_tokenizer":getattr(args,"agentsafe_judge_tokenizer",""),
+            "judge_context_limit":getattr(args,"agentsafe_judge_context_limit",32768),
+            "context_margin":getattr(args,"agentsafe_context_margin",128),
+            "target_content_format":getattr(args,"agentsafe_target_content_format","string"),
+            "judge_content_format":getattr(args,"agentsafe_judge_content_format","string")}}
+    if method=="amemguard_full":
+        baseline_metadata["transport_configuration"]={
+            "judge_timeout_seconds":getattr(args,"full_judge_timeout",None) or 120.0,
+            "max_attempts":int(os.getenv("AMEMGUARD_TRANSPORT_MAX_ATTEMPTS","1")),
+            "request_payload_unchanged":True,
+            "retry_generation_deterministic":False}
     return {**baseline_metadata,"run_id":run_id,"method":method,"table_role":"main" if method in MAIN else ("identity_audit" if method in IDENTITY_AUDIT else "mechanism"),
             "seed":seed,"topology":topology,"phase":args.phase,"profile":args.profile,"directory":str(run_dir),
             # A lookup hint only: reuse still requires matching dataset, algorithm flags and assets.

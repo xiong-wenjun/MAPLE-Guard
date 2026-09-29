@@ -67,6 +67,14 @@ def add_full_baseline_args(parser, config=None):
         ("full-judge-api-key", str, ""),
         ("full-judge-max-tokens", int, 4096),
         ("agentsafe-profile", str, "paper_components"),
+        ("agentsafe-context-policy", str, "full"),
+        ("agentsafe-target-tokenizer", str, ""),
+        ("agentsafe-target-content-format", str, "string"),
+        ("agentsafe-target-context-limit", int, None),
+        ("agentsafe-judge-tokenizer", str, ""),
+        ("agentsafe-judge-content-format", str, "string"),
+        ("agentsafe-judge-context-limit", int, None),
+        ("agentsafe-context-margin", int, 128),
         ("agentsafe-calibration-manifest", str, ""),
         ("agentsafe-policy-file", str, ""),
         ("agentsafe-criteria-file", str, ""),
@@ -245,7 +253,8 @@ def _factory(args):
                 response.raise_for_status()
                 value = response.json()
             return value["data"][0]["embedding"]
-        guard = AgentSafeFull(public, judge, tracked_client(embed))
+        from .agentsafe_context import make_context_budget
+        guard = AgentSafeFull(public, judge, tracked_client(embed), judge_budget=make_context_budget(args, "judge"))
         required = {str(i) for i in range(int(getattr(args, "agents", 0)))}
         if getattr(args, "preload_haystack", False):
             required.add("-1")
@@ -281,6 +290,12 @@ class FullRuntime:
         if self.method == "agentsafe_full" and getattr(args, "memory_backend", "") == "memrl" and not self.state_path:
             raise ValueError("Persistent AgentSafe requires --baseline-state-path to preserve reviews across restarts")
         self.guard = guard if guard is not None else _factory(args)
+        self.target_context_budget = None
+        if self.method == "agentsafe_full":
+            from .agentsafe_context import make_context_budget
+            self.target_context_budget = make_context_budget(args, "target")
+            if self.target_context_budget is not None and hasattr(self.guard, "provenance"):
+                self.guard.provenance["target_context_policy"] = self.target_context_budget.metadata
         self.task_id = None
         self.question = ""
         self.contexts = {}
@@ -303,6 +318,8 @@ class FullRuntime:
                 raise ValueError("AgentSafe runtime requires holder-local version 2 state")
             if data.get("experiment_identity") != self.experiment_identity:
                 raise ValueError("AgentSafe state belongs to a different experiment/configuration")
+            if self.target_context_budget is not None and data.get("target_context_policy") != self.target_context_budget.metadata:
+                raise ValueError("AgentSafe state belongs to a different target context policy/tokenizer")
             self.holders_by_memory = {k:set(v) for k,v in data.get("holders", {}).items()}
             self.private_holders = data.get("private_holders", {})
             self.overlay = data.get("metadata", {})
@@ -328,6 +345,8 @@ class FullRuntime:
                             "metadata":e.baseline_metadata,"memory_scope":getattr(e,"memory_scope","agent_private"),
                             "status":getattr(e,"status","active")} for e in self.entries.values()],
                 "guard":self.guard.state_dict() if hasattr(self.guard, "state_dict") else {}}
+        if self.target_context_budget is not None:
+            data["target_context_policy"] = self.target_context_budget.metadata
         temp = path.with_name(path.name + ".tmp." + str(os.getpid()))
         temp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
         os.replace(temp, path)
@@ -383,7 +402,10 @@ class FullRuntime:
                 if allowed:
                     permitted.append(record)
             history = permitted
-            if history:
+            if self.target_context_budget is not None:
+                context, audit = self.target_context_budget.select_history(context, history)
+                self.pending.append(self._decision(agent_id, "context_view", "agentsafe_context_budget", audit))
+            elif history:
                 context.append({"role":"user", "content":"AgentSafe permitted conversation history:\n" +
                                 "\n".join(str(record["text"]) for record in history)})
         if hasattr(self.guard, "prepare_messages"):
