@@ -1,7 +1,7 @@
-"""Run an audited recovery queue with isolated attempts and per-lane locks.
+"""Run an audited recovery queue with task checkpoints and per-lane locks.
 
 Plans identify existing failed lanes. Successful original runs and live workers
-are never replaced. The Codex heartbeat can resume this controller after inspecting
+are never replaced. Operators can resume this controller after inspecting
 its state; transport retries are bounded and output validity remains mandatory.
 """
 from __future__ import annotations
@@ -42,7 +42,7 @@ def rewrite_job(job, directory, source, overrides):
         raise ValueError("Recovery cannot override the method, data or experimental identity")
     new = copy.deepcopy(job)
     old_dir, old_id = str(job["directory"]), job["run_id"]
-    command = list(job["command"])
+    command = [x for x in job["command"] if x not in {"--resume-task-checkpoint", "--checkpoint-allow-budget-change"}]
     entry = next(x for x in command if x.endswith("/tools/run_instrumented.py"))
     old_source = Path(entry).parents[1]
     if not MODULES.intersection(command):
@@ -65,7 +65,14 @@ def rewrite_job(job, directory, source, overrides):
             command[command.index(name)+1] = str(value)
         else:
             command += [name, str(value)]
+    checkpoint_dir = str(directory / "task-checkpoints")
+    if "--task-checkpoint-dir" in command:
+        command[command.index("--task-checkpoint-dir")+1] = checkpoint_dir
+    else:
+        command += ["--task-checkpoint-dir", checkpoint_dir]
     if isinstance(new.get("resolved_args"), dict):
+        new["resolved_args"].update(task_checkpoint_dir=checkpoint_dir, resume_task_checkpoint=False,
+                                    checkpoint_allow_budget_change=False)
         for name, value in overrides.items():
             parsed = float(value) if name.endswith("timeout") else int(value)
             new["resolved_args"][name[2:].replace("-", "_")] = parsed
@@ -76,6 +83,24 @@ def rewrite_job(job, directory, source, overrides):
                status="prepared", original_run_id=old_id, original_directory=old_dir,
                recovery_overrides=dict(overrides))
     return new
+
+def resume_job(job):
+    """Keep the same source, outputs and experimental identity; worker verifies hashes."""
+    command = list(job["command"])
+    checkpoint = flag(command, "--task-checkpoint-dir")
+    if not checkpoint or not Path(checkpoint, "latest.json").is_file():
+        return None
+    entry = next(x for x in command if x.endswith("/tools/run_instrumented.py"))
+    if Path(entry).parents[1].resolve() != ROOT.resolve():
+        raise ValueError("Resume requires the same frozen source as the checkpoint")
+    result = copy.deepcopy(job)
+    if "--resume-task-checkpoint" not in command:
+        command.append("--resume-task-checkpoint")
+    result.update(command=command, status="prepared", checkpoint_resume=True,
+                  resume_count=int(job.get("resume_count", 0))+1)
+    if isinstance(result.get("resolved_args"),dict):
+        result["resolved_args"]["resume_task_checkpoint"] = True
+    return result
 
 @contextlib.contextmanager
 def lane_lock(path):
@@ -173,8 +198,22 @@ def environment(command, credentials):
 
 def run_job(job, env, handle, expected_ids):
     directory = Path(job["directory"])
-    directory.mkdir(parents=True, exist_ok=False)
-    if "maple_guard.infa_memlink_eval" in job["command"]:
+    resuming = "--resume-task-checkpoint" in job["command"]
+    if resuming:
+        if running_directory(directory):
+            raise RuntimeError("Benchmark worker already running: "+str(directory))
+        if not directory.is_dir():
+            raise ValueError("Missing checkpoint working directory")
+        # Preserve controller metadata/logs; the worker separately archives and
+        # rolls back memory, traces and API journals under its checkpoint lock.
+        audit = directory / ("resume-audit-"+str(time.time_ns()))
+        audit.mkdir(mode=0o700)
+        for name in ("run.json","run.log"):
+            if (directory/name).exists():
+                (directory/name).replace(audit/name)
+    else:
+        directory.mkdir(parents=True, exist_ok=False)
+    if not resuming and "maple_guard.infa_memlink_eval" in job["command"]:
         (directory/"trace.jsonl").symlink_to(job["method"]+".trace.jsonl")
         (directory/"trace.summary.json").symlink_to("summary.json")
     env = dict(env, MAPLE_CALL_LOG=str(directory/"api-calls.jsonl"),
@@ -232,8 +271,24 @@ def run_lane(plan, lane):
                     # Verify endpoints before allocating another output directory.
                     env = environment(original["command"], lane["credentials"])
                     attempts += 1
-                    dest = root/"runs"/(key+"_recovery"+str(attempts))
-                    job = rewrite_job(original, dest, ROOT, lane.get("overrides", {}))
+                    job = None
+                    previous = state.get("current_directory") if state.get("current_run") == key else None
+                    previous = previous or original["directory"]
+                    if previous and Path(previous,"run.json").is_file():
+                        prior = read(Path(previous)/"run.json")
+                        candidate = resume_job(prior)
+                        if candidate is not None:
+                            if prior.get("status") not in {"running","prepared"} and not retryable_failure(previous):
+                                raise RuntimeError("Checkpoint retained; diagnose deterministic failure before resuming: "+previous)
+                            for option,value in lane.get("overrides", {}).items():
+                                if str(flag(candidate["command"],option)) != str(value):
+                                    raise ValueError("Checkpoint configuration change requires explicit audited resume: "+option)
+                            job = candidate
+                    if job is None:
+                        dest = root/"runs"/(key+"_recovery"+str(attempts))
+                        job = rewrite_job(original, dest, ROOT, lane.get("overrides", {}))
+                    else:
+                        dest = Path(job["directory"])
                     state["attempts"][key] = attempts
                     state.update(current_run=key, current_seed=original["seed"], current_directory=str(dest))
                     save(state_path, state)

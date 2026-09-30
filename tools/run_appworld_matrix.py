@@ -58,7 +58,7 @@ def freeze_configs(run_root, topologies):
 
 def arguments():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--task-checkpoints", action="store_true", help="Save complete per-task checkpoints for provenance_acl.")
+    p.add_argument("--task-checkpoints", action=argparse.BooleanOptionalAction, default=True, help="Save complete per-task checkpoints for every supported method.")
     p.add_argument("--bundle",required=True)
     p.add_argument("--services",required=True,help="0600 credential file; contents never written to manifests")
     p.add_argument("--task-service",default="inference1")
@@ -163,8 +163,6 @@ def source_fingerprint():
     return digest.hexdigest()
 
 def build_job(args, method, seed, services, topology="star", config_snapshot=None):
-    if getattr(args, "task_checkpoints", False) and method != "provenance_acl":
-        raise ValueError("Task checkpoints currently support provenance_acl only")
     if method not in MAIN+MECHANISM+GATES+IDENTITY_AUDIT: raise ValueError("Unrecognized experiment method: "+method)
     if args.profile=="paper-code" and method not in ("maple_guard","no_defense_memrl"):
         raise ValueError("Paper-code bridge currently restricted to original MAPLE and No Defense")

@@ -26,7 +26,7 @@ class AppWorldCheckpointTests(unittest.TestCase):
         self.assertEqual(args.task_checkpoint_dir, "/tmp/checkpoints")
         self.assertTrue(args.resume_task_checkpoint)
 
-    def test_matrix_checkpoint_flag_is_opt_in_and_acl_only(self):
+    def test_matrix_checkpoint_flag_supports_acl_and_maple(self):
         with patch("sys.argv", ["matrix", "--bundle", "/tmp/tasks", "--services", "/tmp/services",
                                "--run-root", "/tmp/run", "--task-checkpoints"]):
             args = matrix.arguments()
@@ -34,8 +34,7 @@ class AppWorldCheckpointTests(unittest.TestCase):
         services = {"q": {"base_url": "http://q/v1", "model": "Qwen"}, "embedding": {"base_url": "http://e/v1", "model": "embed"}}
         job = matrix.build_job(args, "provenance_acl", 42, services)
         self.assertIn("--task-checkpoint-dir", job["command"])
-        with self.assertRaisesRegex(ValueError, "provenance_acl"):
-            matrix.build_job(args, "maple_guard", 42, services)
+        self.assertIn("--task-checkpoint-dir", matrix.build_job(args, "maple_guard", 42, services)["command"])
         args.task_checkpoints = False
         self.assertNotIn("--task-checkpoint-dir", matrix.build_job(args, "provenance_acl", 42, services)["command"])
 
@@ -51,11 +50,13 @@ class AppWorldCheckpointTests(unittest.TestCase):
         bundle = SimpleNamespace(private_memories={0: [], 1: []}, shared_memories=[])
         saved, calls, summaries = [], [], []
         checkpoint = types.ModuleType("maple_guard.task_checkpoint")
+        checkpoint.recover_trace_id = lambda args: None
         checkpoint.run_lock = lambda actual_args: contextlib.nullcontext()
         checkpoint.load_checkpoint = lambda actual_args: {"stream_state": initial}
         checkpoint.restore_bundle = lambda *a: None
         def save(actual_args, actual_bundle, state, trace_path):
             saved.append((state, Path(trace_path).read_text()))
+        checkpoint.checkpoint_summary = lambda args: {}
         checkpoint.save_checkpoint = save
         def task(trace_id, idx, task, poison, *state):
             calls.append(idx)

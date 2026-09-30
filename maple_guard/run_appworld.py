@@ -55,8 +55,6 @@ def _cfg(path: str) -> Dict[str, Any]:
 def _parse_appworld_known(argv: Sequence[str]) -> tuple[argparse.Namespace, List[str], Dict[str, Any]]:
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--config", default=os.environ.get("CONFIG_YAML", DEFAULT_CONFIG))
-    pre.add_argument("--task-checkpoint-dir", default="", help="Atomic task checkpoints for provenance_acl only.")
-    pre.add_argument("--resume-task-checkpoint", action="store_true", help="Restore an existing complete task checkpoint.")
     pre.add_argument("--benchmark-bundle", default="", help="Frozen user bundle; evaluates action selection, not native AppWorld execution.")
     pre.add_argument("--appworld-root", default="")
     pre.add_argument("--appworld-split", default="")
@@ -80,15 +78,13 @@ def parse_args() -> argparse.Namespace:
         args = stream.parse_args()
     finally:
         sys.argv = original_argv
-    args.task_checkpoint_dir = appworld_args.task_checkpoint_dir
-    args.resume_task_checkpoint = appworld_args.resume_task_checkpoint
     args.benchmark_bundle = appworld_args.benchmark_bundle
     args.appworld_root = appworld_args.appworld_root
     args.appworld_split = appworld_args.appworld_split
     args.index_out_dir = appworld_args.index_out_dir
     args.rebuild_index = bool(appworld_args.rebuild_index)
     args.task_mode = "appworld"
-    if not args.trace_id:
+    if not args.trace_id and not getattr(args, "resume_task_checkpoint", False):
         args.trace_id = f"appworld_{int(time.time())}_{args.method}_{args.attack_variant}_{args.appworld_split}"
     return args
 
@@ -212,6 +208,8 @@ def main() -> None:
 
 
 def run_stream(args: argparse.Namespace) -> None:
+    from maple_guard.task_checkpoint import recover_trace_id
+    recover_trace_id(args)
     random.seed(args.seed)
     manifest = ensure_appworld_index(args)
     args.dataset = args.benchmark_bundle or args.dataset or dataset_for_split(args)
@@ -228,8 +226,6 @@ def run_stream(args: argparse.Namespace) -> None:
     resume = bool(getattr(args, "resume_task_checkpoint", False))
     if resume and not checkpoint_enabled:
         raise ValueError("--resume-task-checkpoint requires --task-checkpoint-dir")
-    if checkpoint_enabled and args.method != "provenance_acl":
-        raise ValueError("Task checkpoints currently support provenance_acl only")
     if checkpoint_enabled and not resume and Path(args.out).exists():
         raise ValueError("Fresh checkpoint run requires an unused trace path")
     restored = None
@@ -350,6 +346,8 @@ def run_stream(args: argparse.Namespace) -> None:
         memory_backend,
         agent_trust,
     )
+    from maple_guard.task_checkpoint import checkpoint_summary
+    summary["task_checkpoint"] = checkpoint_summary(args)
     summary["baseline_provenance"] = ep.baseline_run_provenance(args)
     add_appworld_summary(summary, records)
     summary["appworld_manifest"] = manifest

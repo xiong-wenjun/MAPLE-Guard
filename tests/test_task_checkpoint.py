@@ -174,7 +174,7 @@ class TaskCheckpointTests(unittest.TestCase):
         self.assertTrue(data["checkpoint_path"])
 
     def test_other_methods_fail_closed(self):
-        self.args.method = "no_defense_memrl"
+        self.args.method = "unknown_method"
         with self.assertRaisesRegex(self.ck.CheckpointError, "provenance_acl"):
             self.save()
 

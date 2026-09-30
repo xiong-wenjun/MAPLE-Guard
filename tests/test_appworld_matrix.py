@@ -155,7 +155,7 @@ class TopologyMatrixTests(unittest.TestCase):
                              (matrix.ROOT / "configs/appworld_star.yaml").read_bytes())
             reference_args = {}
             runtime_fields = {"config", "trace_id", "memory_run_id", "baseline_experiment_id",
-                              "memory_store_dir", "baseline_state_path", "out", "amemguard_experiment_id",
+                              "memory_store_dir", "baseline_state_path", "out", "amemguard_experiment_id", "task_checkpoint_dir",
                               "communication_topology"}
             for job in manifest["jobs"]:
                 config = manifest["config_snapshots"][job["topology"]]
@@ -198,6 +198,6 @@ class TopologyMatrixTests(unittest.TestCase):
                         legacy = dict(job, command=[arg.replace(job["run_id"], legacy_id) for arg in command])
                         new_args, old_args = vars(self.resolve(job)), vars(self.resolve(legacy))
                         runtime_fields = {"config", "trace_id", "memory_run_id", "baseline_experiment_id",
-                                          "memory_store_dir", "baseline_state_path", "out", "amemguard_experiment_id"}
+                                          "memory_store_dir", "baseline_state_path", "out", "amemguard_experiment_id", "task_checkpoint_dir"}
                         self.assertEqual({k: v for k, v in new_args.items() if k not in runtime_fields},
                                          {k: v for k, v in old_args.items() if k not in runtime_fields})

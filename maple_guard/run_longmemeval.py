@@ -11,6 +11,7 @@ pattern imitation metrics.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import hashlib
 import json
 import os
@@ -232,6 +233,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-every", type=int, default=int(cfg_get(cfg, "experiment.log_every", 5)))
     p.add_argument("--dry-run", action="store_true")
     ep.add_full_baseline_args(p, cfg)
+    from maple_guard.task_checkpoint import add_checkpoint_args
+    add_checkpoint_args(p)
     args = p.parse_args()
     args.method_explicit = any(arg == "--method" or arg.startswith("--method=") for arg in sys.argv[1:])
     return args
@@ -1936,6 +1939,18 @@ def short_status(idx: int, total: int, record: LongMemTaskRecord, elapsed: float
 
 def main() -> None:
     args = resolve_args(parse_args())
+    from maple_guard.task_checkpoint import run_lock
+    if getattr(args, "task_checkpoint_dir", ""):
+        with run_lock(args):
+            return run_stream(args)
+    if getattr(args, "resume_task_checkpoint", False):
+        raise ValueError("--resume-task-checkpoint requires --task-checkpoint-dir")
+    return run_stream(args)
+
+
+def run_stream(args) -> None:
+    from maple_guard.task_checkpoint import recover_trace_id
+    recover_trace_id(args)
     examples = load_longmemeval(args.dataset, args.tasks, args.seed)
     if not examples:
         raise ValueError("Empty LongMemEval task stream")
@@ -1973,6 +1988,27 @@ def main() -> None:
         }, ensure_ascii=False, indent=2))
         return
 
+    checkpoint_enabled = bool(getattr(args, "task_checkpoint_dir", ""))
+    resume = bool(getattr(args, "resume_task_checkpoint", False))
+    if resume and not checkpoint_enabled:
+        raise ValueError("--resume-task-checkpoint requires --task-checkpoint-dir")
+    if checkpoint_enabled and not resume and Path(args.out).exists():
+        raise ValueError("Fresh checkpoint run requires an unused trace path")
+    restored = None
+    if checkpoint_enabled:
+        from maple_guard.task_checkpoint import load_checkpoint, restore_bundle, save_checkpoint
+        if resume:
+            restored = load_checkpoint(args)
+            state = restored["stream_state"]
+            next_index = state["next_task_index"]
+            if (not isinstance(next_index, int) or isinstance(next_index, bool)
+                    or not 0 <= next_index <= len(examples)
+                    or len(state["records"]) != next_index
+                    or state["task_ids"] != [task.task_id for task in examples]
+                    or [record["task_index"] for record in state["records"]] != list(range(next_index))
+                    or [record["task_id"] for record in state["records"]] != [task.task_id for task in examples[:next_index]]):
+                raise ValueError("Checkpoint task order, schedule or completed prefix does not match")
+
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     if ep.create_memory_backend_bundle is None:
         raise RuntimeError(f"Failed to import MemRL backend: {ep.MEMORY_BACKEND_IMPORT_ERROR}")
@@ -1985,11 +2021,41 @@ def main() -> None:
     poisoned_targets: Dict[str, str] = {}
     poisoned_patterns: Dict[str, str] = {}
     records: List[LongMemTaskRecord] = []
+    start_index = 0
+    if restored is not None:
+        restore_bundle(memory_backend, restored)
+        private_memories = memory_backend.private_memories
+        shared_memories = memory_backend.shared_memories
+        state = restored["stream_state"]
+        start_index = state["next_task_index"]
+        records = [LongMemTaskRecord(**record) for record in state["records"]]
+        answer_cache = state["answer_cache"]
+        loaded_haystack_ids = state["loaded_haystack_ids"]
+        poisoned_targets = state["poisoned_targets"]
+        poisoned_patterns = state["poisoned_patterns"]
+
+    def checkpoint_state(next_index):
+        return {
+            "next_task_index":next_index,
+            "task_ids":[task.task_id for task in examples],
+            "records":[asdict(record) for record in records],
+            "answer_cache":answer_cache,
+            "loaded_haystack_ids":loaded_haystack_ids,
+            "poisoned_targets":poisoned_targets,
+            "poisoned_patterns":poisoned_patterns,
+        }
+
 
     log_progress(args, f"start_longmemeval trace_id={args.trace_id} tasks={len(examples)} attackers={args.attacker_ids} attack_strength={args.attack_strength} out={args.out}")
     start = time.time()
-    with open(args.out, "w", encoding="utf-8") as f:
+    with open(args.out, "a" if resume else "w", encoding="utf-8") as f:
+        if checkpoint_enabled and not resume:
+            f.flush()
+            os.fsync(f.fileno())
+            save_checkpoint(args, memory_backend, checkpoint_state(0), args.out)
         for idx, task in enumerate(examples):
+            if idx < start_index:
+                continue
             t0 = time.time()
             record = run_stream_task(
                 args.trace_id,
@@ -2009,10 +2075,15 @@ def main() -> None:
             records.append(record)
             f.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
             f.flush()
+            if checkpoint_enabled:
+                os.fsync(f.fileno())
+                save_checkpoint(args, memory_backend, checkpoint_state(idx + 1), args.out)
             if args.log_every > 0 and ((idx + 1) % args.log_every == 0 or idx + 1 == len(examples)):
                 log_progress(args, short_status(idx, len(examples), record, time.time() - t0))
 
     summary = summarize(records, args, poisoned_targets, private_memories, shared_memories, memory_backend)
+    from maple_guard.task_checkpoint import checkpoint_summary
+    summary["task_checkpoint"] = checkpoint_summary(args)
     summary["baseline_provenance"] = ep.baseline_run_provenance(args)
     text_memory_dir = dump_text_memory(args, private_memories, shared_memories, memory_backend, summary)
     summary["text_memory_dir"] = text_memory_dir
