@@ -8,6 +8,8 @@ prompts, then adds a persistent-memory layer guarded by maple_guard_core.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import hashlib
 import json
 import os
 import random
@@ -29,7 +31,7 @@ _LOCAL_ROOT = str(Path(__file__).resolve().parents[1])
 if _LOCAL_ROOT not in sys.path:
     sys.path.insert(0, _LOCAL_ROOT)
 from evaluate.defense_methods.full_runtime import (
-    FULL_METHODS, add_full_baseline_args, current_runtime, scoped_baseline, public_config, strict_runtime_active,
+    FULL_METHODS, add_full_baseline_args, current_runtime, scoped_baseline, runtime_scope, public_config, strict_runtime_active,
 )
 
 OFFICIAL_COMMUNICATION_METHODS = {
@@ -193,6 +195,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stream-memories", action=argparse.BooleanOptionalAction, default=bool(cfg_get(cfg, "stream_memories", True)))
     parser.add_argument("--write-final-json", action=argparse.BooleanOptionalAction, default=bool(cfg_get(cfg, "write_final_json", True)))
     add_full_baseline_args(parser, cfg)
+    from maple_guard.task_checkpoint import add_checkpoint_args
+    add_checkpoint_args(parser)
     args = parser.parse_args()
     if not 0 < args.chat_timeout < float("inf"):
         parser.error("--chat-timeout must be positive and finite")
@@ -1034,8 +1038,25 @@ def _progress_line(method: str, task_idx: int, total: int, progress: Dict[str, A
     )
 
 
-@scoped_baseline
 def run_one_method(ep: Any, records: Sequence[Dict[str, Any]], method: str, args: argparse.Namespace) -> Dict[str, Any]:
+    from maple_guard.task_checkpoint import run_lock
+    previous_method = getattr(args, "method", None)
+    args.method = method
+    try:
+        with contextlib.ExitStack() as contexts:
+            if getattr(args, "task_checkpoint_dir", ""):
+                contexts.enter_context(run_lock(args))
+            elif getattr(args, "resume_task_checkpoint", False):
+                raise ValueError("--resume-task-checkpoint requires --task-checkpoint-dir")
+            return _run_one_method(ep, records, method, args, contexts)
+    finally:
+        if previous_method is None:
+            delattr(args, "method")
+        else:
+            args.method = previous_method
+
+
+def _run_one_method(ep, records, method, args, contexts):
     rng = random.Random(args.seed)
     private_memories: Dict[int, List[Any]] = {}
     shared_memories: List[Any] = []
@@ -1046,6 +1067,35 @@ def run_one_method(ep: Any, records: Sequence[Dict[str, Any]], method: str, args
 
     chat_kwargs = {"enable_thinking": False} if args.disable_chat_thinking else None
     out_root = Path(args.output_root)
+    progress_path = Path(args.output_root) / f"{method}.progress.jsonl"
+    trace_path = out_root / f"{method}.trace.jsonl"
+    metrics_path = out_root / f"{method}.metrics.jsonl"
+    decisions_path = out_root / f"{method}.decisions.jsonl"
+    memory_journal_path = out_root / f"{method}.memories.jsonl"
+    partial_summary_path = out_root / f"{method}.summary.partial.json"
+    checkpoint_enabled = bool(getattr(args, "task_checkpoint_dir", ""))
+    resume = bool(getattr(args, "resume_task_checkpoint", False))
+    outputs = [progress_path, trace_path, metrics_path, decisions_path, memory_journal_path, partial_summary_path]
+    restored = None
+    if checkpoint_enabled:
+        from maple_guard.task_checkpoint import load_checkpoint, restore_bundle, save_checkpoint
+        args.out = str(trace_path)
+        args._checkpoint_extra_paths = {
+            "progress":str(progress_path), "metrics":str(metrics_path),
+            "decisions":str(decisions_path), "memories":str(memory_journal_path),
+            "partial_summary":str(partial_summary_path)}
+        args.memory_store_dir = args.memory_store_dir or str(out_root / "memory_store")
+        # Identity includes the actual prepared cases, adjacency matrices and prompts.
+        args.checkpoint_cases_sha256 = hashlib.sha256(json.dumps(
+            records, sort_keys=True, default=_json_default).encode()).hexdigest()
+        if resume:
+            restored = load_checkpoint(args)
+        elif any(path.exists() for path in outputs):
+            raise ValueError("Fresh checkpoint run requires unused output paths")
+    if not resume:
+        for path in outputs:
+            if path.exists():
+                path.unlink()
     if args.memory_backend == "memrl":
         if ep.create_memory_backend_bundle is None:
             raise RuntimeError(f"Failed to import MemRL backend: {getattr(ep, 'MEMORY_BACKEND_IMPORT_ERROR', None)}")
@@ -1057,20 +1107,49 @@ def run_one_method(ep: Any, records: Sequence[Dict[str, Any]], method: str, args
         args.memory_run_id = old_memory_run_id
         private_memories = memory_backend.private_memories
         shared_memories = memory_backend.shared_memories
-    progress_path = Path(args.output_root) / f"{method}.progress.jsonl"
-    trace_path = out_root / f"{method}.trace.jsonl"
-    metrics_path = out_root / f"{method}.metrics.jsonl"
-    decisions_path = out_root / f"{method}.decisions.jsonl"
-    memory_journal_path = out_root / f"{method}.memories.jsonl"
-    partial_summary_path = out_root / f"{method}.summary.partial.json"
-    for path in [progress_path, trace_path, metrics_path, decisions_path, memory_journal_path, partial_summary_path]:
-        if path.exists():
-            path.unlink()
     metrics_acc = InfaMetricAccumulator(args)
     stats = RunningDecisionStats(decisions_path, bool(args.stream_decisions))
-    method_started = time.time()
+    task_ids = [task_for_record(ep, d, i, args).task_id for i,d in enumerate(records)]
+    completed = []
+    start_index = 0
+    elapsed = 0.0
+    if restored is not None:
+        state = restored["stream_state"]
+        if state["task_ids"] != task_ids:
+            raise ValueError("Checkpoint task order changed")
+        restore_bundle(memory_backend, restored)
+        private_memories = memory_backend.private_memories
+        shared_memories = memory_backend.shared_memories
+        start_index = state["next_task_index"]
+        completed = state["records"]
+        rng.setstate(state["local_rng"])
+        vars(metrics_acc).update(state["metrics"])
+        vars(stats).update(state["stats"])
+        attacker_selected = state["attacker_selected"]
+        benign_response_slots = state["benign_response_slots"]
+        official_defense_state = state["official_defense_state"]
+        elapsed = state["elapsed"]
+    # Enter only after restore so nested defense calls see the restored runtime.
+    contexts.enter_context(runtime_scope(args, method))
+    method_started = time.time() - elapsed
+
+    def checkpoint_state(next_index):
+        return {
+            "next_task_index":next_index, "task_ids":task_ids, "records":completed,
+            "local_rng":rng.getstate(),
+            "metrics":{k:v for k,v in vars(metrics_acc).items() if k != "args"},
+            "stats":{k:v for k,v in vars(stats).items() if k not in {"path","enabled"}},
+            "attacker_selected":attacker_selected, "benign_response_slots":benign_response_slots,
+            "official_defense_state":official_defense_state,
+            "elapsed":time.time()-method_started,
+        }
+    if checkpoint_enabled and not resume:
+        trace_path.touch()
+        save_checkpoint(args, memory_backend, checkpoint_state(0), args.out)
 
     for task_idx, original in enumerate(records):
+        if task_idx < start_index:
+            continue
         d = deepcopy(original)
         d["adj_matrix"] = getattr(d["adj_matrix"], "tolist", lambda: d["adj_matrix"])()
         task = task_for_record(ep, d, task_idx, args)
@@ -1229,6 +1308,10 @@ def run_one_method(ep: Any, records: Sequence[Dict[str, Any]], method: str, args
             memory_journal_path if args.stream_memories else None,
         )
         _write_json(partial_summary_path, partial)
+        if checkpoint_enabled:
+            completed.append({"task_index":task_idx, "task_id":task.task_id})
+            # The checkpoint copies and fsyncs every closed journal before publication.
+            save_checkpoint(args, memory_backend, checkpoint_state(task_idx + 1), args.out)
         if args.progress_every > 0 and ((task_idx + 1) % args.progress_every == 0 or task_idx + 1 == len(records)):
             print(_progress_line(method, task_idx, len(records), progress), flush=True)
 
@@ -1246,6 +1329,8 @@ def run_one_method(ep: Any, records: Sequence[Dict[str, Any]], method: str, args
         decisions_path if args.stream_decisions else None,
         memory_journal_path if args.stream_memories else None,
     )
+    from maple_guard.task_checkpoint import checkpoint_summary
+    summary["task_checkpoint"] = checkpoint_summary(args)
     if args.write_final_json:
         method_path = out_root / f"{method}.json"
         _stream_json_array_from_jsonl(trace_path, method_path)
@@ -1344,6 +1429,8 @@ def main() -> None:
 
     records = load_infa_cases(args)
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
+    if getattr(args, "task_checkpoint_dir", "") and len(methods) != 1:
+        raise ValueError("Use one method per checkpoint directory")
     combined_summary: Dict[str, Any] = {
         "config": public_config(args),
         "methods": {},

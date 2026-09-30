@@ -1,9 +1,9 @@
-"""Durable, fail-closed task boundaries for new AppWorld provenance_acl runs.
+"""Durable, fail-closed task boundaries for persistent benchmark runs.
 
 Call load_checkpoint before creating/opening any memory backend; call save_checkpoint
 only after a task is complete and its trace has been flushed. One process owns a run.
 A snapshot records local logical state, not remote model/server determinism. No pickle,
-embedding regeneration, legacy trace reconstruction, or cross-configuration resume.
+embedding regeneration, legacy trace reconstruction, or silent cross-configuration resume.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ import stat
 import sys
 import uuid
 
-SCHEMA = 1
+SCHEMA = 2
 _SERVICE_FIELDS = (
     "_cube_timestamp", "embedding_dim", "default_cube_id",
     "dict_memory", "query_embeddings", "_q_cache", "_mem_cache",
@@ -43,6 +43,18 @@ class _EntryRef(int):
 
 def _encode(value):
     """Typed JSON preserves integer keys, tuples, ndarray dtype, and dynamic attrs."""
+    from types import SimpleNamespace
+    if isinstance(value, SimpleNamespace):
+        return {"$type":"namespace", "value":_encode(vars(value))}
+    if type(value).__module__ == "evaluate.defense_methods.base" and type(value).__name__ == "OfficialDefenseState":
+        from .baseline_checkpoint import capture_official
+        return {"$type":"official_defense", "value":_encode(capture_official(value))}
+    if type(value).__module__.startswith("torch") and hasattr(value, "detach"):
+        import torch
+        tensor = value.detach().cpu().contiguous()
+        return {"$type":"torch_tensor", "dtype":str(tensor.dtype).split(".")[-1],
+                "shape":list(tensor.shape),
+                "value":base64.b64encode(tensor.reshape(-1).view(torch.uint8).numpy().tobytes()).decode("ascii")}
     if isinstance(value, _EntryRef):
         return {"$type": "entry_ref", "index": int(value)}
     if value is None or type(value) in (str, bool, int, float):
@@ -76,6 +88,21 @@ def _decode(value):
     if not isinstance(value, dict) or "$type" not in value:
         raise CheckpointError("Invalid typed checkpoint state")
     kind = value["$type"]
+    if kind == "namespace":
+        from types import SimpleNamespace
+        return SimpleNamespace(**_decode(value["value"]))
+    if kind == "official_defense":
+        from .baseline_checkpoint import decode_official
+        return decode_official(_decode(value["value"]))
+    if kind == "torch_tensor":
+        import torch
+        if value["dtype"] not in {"float16","float32","float64","bfloat16","int8","int16","int32","int64","uint8","bool"}:
+            raise CheckpointError("Unsupported tensor dtype")
+        raw = bytearray(base64.b64decode(value["value"], validate=True))
+        dtype = getattr(torch,value["dtype"])
+        if not raw:
+            return torch.empty(value["shape"],dtype=dtype)
+        return torch.frombuffer(raw,dtype=torch.uint8).view(dtype).reshape(value["shape"]).clone()
     if kind == "entry_ref":
         if type(value["index"]) is not int:
             raise CheckpointError("Invalid checkpoint entry reference")
@@ -152,8 +179,12 @@ def _absolute(value):
 
 
 def _check_method(args):
-    if getattr(args, "method", None) != "provenance_acl" or getattr(args, "task_mode", None) != "appworld":
-        raise CheckpointError("Task checkpoints support only AppWorld provenance_acl")
+    from evaluate.defense_methods.full_runtime import FULL_METHODS, MEMORY_METHODS, STRICT_COMMUNICATION_METHODS, MAPLE_GATE_ABLATIONS
+    supported = set(FULL_METHODS + MEMORY_METHODS + STRICT_COMMUNICATION_METHODS + MAPLE_GATE_ABLATIONS) | {"maple_guard", "no_defense_memrl"}
+    if getattr(args,"method",None) not in supported:
+        raise CheckpointError("Unsupported method for task checkpoints (including provenance_acl)")
+    if getattr(args,"memory_backend","memrl") != "memrl":
+        raise CheckpointError("Durable task checkpoints require the MemRL backend")
 
 
 def checkpoint_root(args):
@@ -170,6 +201,10 @@ def _disk_paths(args, trace_path):
         paths["api_journal"] = _absolute(os.environ["MAPLE_CALL_LOG"])
     if getattr(args, "baseline_state_path", ""):
         paths["baseline_state"] = _absolute(args.baseline_state_path)
+    for label, value in getattr(args, "_checkpoint_extra_paths", {}).items():
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", label) or label in paths:
+            raise CheckpointError("Invalid extra checkpoint path label")
+        paths[label] = _absolute(value)
     root = checkpoint_root(args)
     all_paths = list(paths.values()) + [root]
     for index, a in enumerate(all_paths):
@@ -179,6 +214,51 @@ def _disk_paths(args, trace_path):
             if a == b or a in b.parents or b in a.parents:
                 raise CheckpointError("Checkpoint working paths must not overlap")
     return paths
+
+
+_ASSET_HASH_CACHE = {}
+
+
+def _asset_hash(path):
+    # Immutable model files can be gigabytes. Rehash on any inode/size/time change;
+    # a new process starts with an empty cache and verifies bytes again.
+    path = Path(path).resolve()
+    st = path.stat()
+    signature = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    previous = _ASSET_HASH_CACHE.get(str(path))
+    if previous is None or previous[0] != signature:
+        previous = (signature, _hash(path))
+        _ASSET_HASH_CACHE[str(path)] = previous
+    return previous[1]
+
+
+def _asset_identity(args):
+    result = {}
+    suffixes = (".py", ".json", ".yaml", ".yml", ".txt", ".model", ".vocab",
+                ".merges", ".bin", ".pt", ".pth", ".safetensors")
+    for key, value in sorted(vars(args).items()):
+        if key.startswith("_") or not isinstance(value, str) or not value:
+            continue
+        if not (key.endswith(("_code_dir", "_bert_dir", "_tokenizer", "_checkpoint",
+                              "_policy_file", "_criteria_file", "_calibration_manifest"))
+                or key in {"piguard_model", "infa_embedding_model", "official_defense_embedding_model",
+                           "infa_root", "official_defense_gnn_root", "official_defense_guardian_root"}):
+            continue
+        path = Path(value)
+        if path.is_file():
+            result[key] = {"path":str(path.resolve()),"sha256":_asset_hash(path)}
+        elif path.is_dir():
+            files = {}
+            for candidate in sorted(path.rglob("*")):
+                relative = candidate.relative_to(path)
+                if any(part in {".git","__pycache__",".pytest_cache"} for part in relative.parts):
+                    continue
+                source_tree = key.endswith(("_code_dir", "_root"))
+                accepted = candidate.suffix == ".py" if source_tree else candidate.name.endswith(suffixes)
+                if candidate.is_file() and accepted:
+                    files[str(relative)] = _asset_hash(candidate)
+            result[key] = {"path":str(path.resolve()),"files":files}
+    return result
 
 
 def build_identity(args):
@@ -194,7 +274,7 @@ def build_identity(args):
         if path.is_file():
             source[name] = _hash(path)
     config = {key: value for key, value in sorted(vars(args).items())
-              if not key.startswith("_") and key != "resume_task_checkpoint"}
+              if not key.startswith("_") and key not in {"resume_task_checkpoint", "checkpoint_allow_budget_change"}}
     inputs = {}
     for key in ("config", "dataset", "benchmark_bundle", "communication_graph", "baseline_config"):
         value = getattr(args, key, "")
@@ -216,22 +296,31 @@ def build_identity(args):
         prompts[name] = {"path": str(path.absolute()) if path is not None else None,
                          "present": present, "sha256": _hash(path) if present else None}
     environment = {key: value for key, value in sorted(os.environ.items())
-                   if key.startswith(("CHAT_", "EMBED_", "OPENAI_", "MAPLE_")) or key in ("EMBEDDING_DIM", "MEMOS_BASE_PATH")}
+                   if key.startswith(("CHAT_", "EMBED_", "OPENAI_", "MAPLE_", "FULL_", "SAFEGUARD_", "OFFICIAL_")) or key in ("EMBEDDING_DIM", "MEMOS_BASE_PATH")}
     versions = {"python": sys.version}
-    for package in ("numpy", "pydantic", "qdrant-client", "MemoryOS"):
+    for package in ("numpy", "pydantic", "qdrant-client", "MemoryOS", "torch", "transformers", "sentence-transformers", "torch-geometric"):
         try:
             versions[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             versions[package] = None
     return {"source": source, "config": _encode(config), "inputs": inputs,
-            "environment": environment, "versions": versions, "prompts": prompts}
+            "environment": environment, "versions": versions, "prompts": prompts, "assets":_asset_identity(args)}
 
 
 def capture_rng_state():
+    # Lazy imports can initialize libraries using Python/NumPy randomness.
+    # Finish them before taking the mutually consistent RNG snapshot.
+    torch = None
+    if importlib.util.find_spec("torch") is not None:
+        import torch
     result = {"random": random.getstate()}
     if "numpy" in sys.modules:
         import numpy as np
         result["numpy"] = np.random.get_state()
+    if torch is not None:
+        result["torch"] = torch.get_rng_state()
+        if torch.cuda.is_initialized():
+            result["cuda"] = torch.cuda.get_rng_state_all()
     return result
 
 
@@ -240,6 +329,13 @@ def restore_rng_state(state):
     if "numpy" in state:
         import numpy as np
         np.random.set_state(state["numpy"])
+    if "torch" in state:
+        import torch
+        torch.set_rng_state(state["torch"])
+        if "cuda" in state:
+            if len(state["cuda"]) != torch.cuda.device_count():
+                raise CheckpointError("CUDA device count changed")
+            torch.cuda.set_rng_state_all(state["cuda"])
 
 
 def _backends(bundle):
@@ -279,21 +375,16 @@ def _capture_bundle(bundle):
              "shared": [ref(e) for e in bundle.shared_memories],
              "quarantine": [ref(e) for e in bundle.quarantine_memories]}
     comparison = getattr(bundle.args, "_full_baseline_runtime", None)
-    comparison_state = None
-    if comparison is not None:
-        from evaluate.defense_methods.comparison_runtime import ComparisonRuntime
-        if type(comparison) is not ComparisonRuntime or comparison.method != "provenance_acl" or comparison.guard is not None:
-            raise CheckpointError("Unsupported comparison runtime checkpoint")
-        def link(value):
-            if isinstance(value, bundle.entry_cls):
-                return _EntryRef(ref(value))
-            if isinstance(value, dict):
-                return {k: link(v) for k, v in value.items()}
-            if isinstance(value, (list, tuple, set)):
-                return type(value)(link(v) for v in value)
-            return value
-        comparison_state = {key: link(value) for key, value in vars(comparison).items()
-                            if key not in {"args", "rules", "guard"}}
+    def link(value):
+        if isinstance(value, bundle.entry_cls):
+            return _EntryRef(ref(value))
+        if isinstance(value, dict):
+            return {k:link(v) for k,v in value.items()}
+        if isinstance(value,(list,tuple,set)):
+            return type(value)(link(v) for v in value)
+        return value
+    from .baseline_checkpoint import capture_runtime
+    comparison_state = capture_runtime(comparison, link)
     return {"objects": objects, "backends": backends, "lists": lists, "comparison": comparison_state}
 
 
@@ -546,8 +637,17 @@ def _validate_runtime(runtime, args):
                 validate_links(item)
     comparison = bundle.get("comparison")
     if comparison is not None:
-        if comparison.get("method") != "provenance_acl" or not isinstance(comparison.get("_embedding_cache"), dict):
+        if comparison.get("method") != args.method or comparison.get("kind") not in {"ComparisonRuntime","FullRuntime"}:
             raise CheckpointError("Invalid comparison runtime checkpoint")
+        guard_classes = {"agentsafe_full":"AgentSafeFull", "amemguard_full":"AMemGuardFull",
+                         "infa_guard_full":"InfaGuardFull", "agentxposed_full_guide":"AgentXposedFull",
+                         "agentxposed_full_kick":"AgentXposedFull", "piguard_retrieval":"PIGuardDetector",
+                         "piguard_lifecycle":"PIGuardDetector"}
+        expected_guard = guard_classes.get(args.method)
+        guard = comparison.get("guard")
+        if ((expected_guard is None and guard is not None) or
+                (expected_guard is not None and (not isinstance(guard,dict) or guard.get("class") != expected_guard))):
+            raise CheckpointError("Invalid checkpoint guard identity")
         validate_links(comparison)
 
 
@@ -584,7 +684,8 @@ def save_checkpoint(args, bundle, stream_state, trace_path):
             if len(trace_lines) != stream_state["next_task_index"]:
                 raise CheckpointError("Trace prefix length does not match completed task boundary")
             manifest = {"schema": SCHEMA, "identity": identity, "paths": specs,
-                        "next_task_index": stream_state["next_task_index"], "files": _inventory(stage)}
+                        "next_task_index": stream_state["next_task_index"], "files": _inventory(stage),
+                        "budget_history":getattr(args,"_checkpoint_budget_history",[])}
             _write(stage / "manifest.json", manifest)
             _fsync_dir(stage)
             os.replace(stage, final)
@@ -594,6 +695,12 @@ def save_checkpoint(args, bundle, stream_state, trace_path):
             _write(pending, pointer)
             os.replace(pending, root / "latest.json")
             _fsync_dir(root)
+            # Bound disk use only after a new generation is fully committed.
+            committed = sorted((p for p in root.glob("task-*") if p.is_dir() and not p.is_symlink()),
+                               key=lambda p:p.stat().st_mtime_ns, reverse=True)
+            for stale in committed[2:]:
+                if stale != final:
+                    shutil.rmtree(stale)
             return final
         except Exception:
             if stage.exists():
@@ -621,8 +728,7 @@ def _read_validated(args, expected_identity):
         if manifest["schema"] != SCHEMA:
             raise CheckpointError("Unsupported checkpoint schema")
         expected = expected_identity if expected_identity is not None else build_identity(args)
-        if manifest["identity"] != expected:
-            raise CheckpointError("Checkpoint source/config/input/environment identity mismatch")
+        _budget_transition(manifest["identity"], expected, args, manifest["next_task_index"])
         inventory = _inventory(generation)
         inventory.pop("manifest.json", None)
         if manifest["files"] != inventory:
@@ -658,6 +764,11 @@ def load_checkpoint(args, expected_identity=None):
     root = checkpoint_root(args)
     with _locked(root):
         generation, manifest, runtime = _read_validated(args, expected_identity)
+        transition = _budget_transition(manifest["identity"], expected_identity or build_identity(args),
+                                        args, manifest["next_task_index"])
+        args._checkpoint_budget_history = list(manifest.get("budget_history",[]))
+        if transition:
+            args._checkpoint_budget_history.append(transition)
         token = uuid.uuid4().hex
         audit = root / ("failed-attempt-" + token)
         staged, moved, installed = {}, [], []
@@ -675,7 +786,7 @@ def load_checkpoint(args, expected_identity=None):
                     _copy_path(generation / "disk" / label, stage, sqlite_backup=False)
                     staged[label] = stage
             _private_mkdir(audit)
-            _write(audit / "recovery.json", {"checkpoint": generation.name, "paths": manifest["paths"]})
+            _write(audit / "recovery.json", {"checkpoint": generation.name, "paths": manifest["paths"], "budget_transition":transition})
             for label, spec in manifest["paths"].items():
                 destination = Path(spec["path"])
                 if destination.exists():
@@ -703,7 +814,7 @@ def load_checkpoint(args, expected_identity=None):
                     shutil.rmtree(stage)
                 elif stage.exists():
                     stage.unlink()
-        return {"stream_state": runtime["stream_state"], "manifest": manifest,
+        return {"stream_state": runtime["stream_state"], "manifest": manifest, "budget_transition":transition,
                 "checkpoint_path": str(generation), "failed_attempt_path": str(audit),
                 "_runtime": runtime}
 
@@ -734,18 +845,80 @@ def restore_bundle(bundle, checkpoint_data):
     bundle.private_memories = {key: [entries[ref] for ref in values] for key, values in lists["private"].items()}
     bundle.shared_memories = [entries[ref] for ref in lists["shared"]]
     bundle.quarantine_memories = [entries[ref] for ref in lists["quarantine"]]
+    if state.get("comparison") is None:
+        vars(bundle.args).pop("_full_baseline_runtime", None)
     if state.get("comparison") is not None:
-        from evaluate.defense_methods.comparison_runtime import ComparisonRuntime
-        comparison = ComparisonRuntime(bundle.args)
+        from .baseline_checkpoint import restore_runtime
         def unlink(value):
-            if isinstance(value, _EntryRef):
+            if isinstance(value,_EntryRef):
                 return entries[int(value)]
-            if isinstance(value, dict):
-                return {k: unlink(v) for k, v in value.items()}
-            if isinstance(value, (list, tuple, set)):
+            if isinstance(value,dict):
+                return {k:unlink(v) for k,v in value.items()}
+            if isinstance(value,(list,tuple,set)):
                 return type(value)(unlink(v) for v in value)
             return value
-        for key, value in state["comparison"].items():
-            setattr(comparison, key, unlink(value))
-        bundle.args._full_baseline_runtime = comparison
+        bundle.args._full_baseline_runtime = restore_runtime(state["comparison"],bundle.args,unlink)
+    from .baseline_checkpoint import hydrate_official
+    hydrate_official(runtime["stream_state"], bundle.args)
     restore_rng_state(runtime["rng"])
+
+
+_BUDGET_FIELDS = {"chat_max_tokens","max_tokens","pattern_judge_max_tokens",
+                  "full_judge_max_tokens","answer_judge_max_tokens"}
+
+def _budget_transition(saved, current, args, index):
+    if saved == current:
+        return None
+    if not getattr(args,"checkpoint_allow_budget_change",False):
+        raise CheckpointError("Checkpoint source/config/input/environment identity mismatch")
+    old, new = dict(saved), dict(current)
+    a,b = _decode(old.pop("config")), _decode(new.pop("config"))
+    oldenv,newenv = dict(old.pop("environment")),dict(new.pop("environment"))
+    changes = {}
+    for key in _BUDGET_FIELDS:
+        av,bv = a.pop(key,None), b.pop(key,None)
+        if av != bv:
+            if type(av) is not int or type(bv) is not int or av<=0 or bv<=0:
+                raise CheckpointError("Invalid checkpoint budget transition")
+            changes[key] = {"before":av,"after":bv}
+    for key in ("CHAT_MAX_TOKENS",):
+        av,bv=oldenv.pop(key,None),newenv.pop(key,None)
+        if av != bv:
+            task_change = changes.get("chat_max_tokens", changes.get("max_tokens"))
+            if task_change is None or str(task_change["after"]) != str(bv):
+                raise CheckpointError("Checkpoint budget environment identity mismatch")
+    if old != new or a != b or oldenv != newenv or not changes:
+        raise CheckpointError("Checkpoint source/config/input/environment identity mismatch")
+    return {"next_task_index":index, "changes":changes,
+            "protocol":"mixed_budget_resume", "uniform_budget":False}
+
+
+def add_checkpoint_args(parser):
+    parser.add_argument("--task-checkpoint-dir", default="",
+                        help="Durable task boundaries; recovery plans enable this for new attempts.")
+    parser.add_argument("--resume-task-checkpoint", action="store_true")
+    parser.add_argument("--checkpoint-allow-budget-change", action="store_true",
+                        help="Explicitly permit and record a token-budget transition on resume.")
+
+def checkpoint_summary(args):
+    return {"enabled":bool(getattr(args,"task_checkpoint_dir","")),
+            "budget_history":getattr(args,"_checkpoint_budget_history",[]),
+            "uniform_budget":not bool(getattr(args,"_checkpoint_budget_history",[]))}
+
+
+def recover_trace_id(args):
+    """Reuse an automatically generated run ID; full validation follows in load."""
+    if not getattr(args, "resume_task_checkpoint", False) or getattr(args, "trace_id", ""):
+        return
+    try:
+        root = checkpoint_root(args)
+        pointer = json.loads((root / "latest.json").read_text())
+        name = pointer["generation"]
+        if not re.fullmatch(r"task-[0-9]{6,}-[0-9a-f]{32}", name):
+            raise ValueError("Invalid generation")
+        path = root / name / "manifest.json"
+        if path.is_symlink() or _hash(path) != pointer["manifest_sha256"]:
+            raise ValueError("Invalid manifest")
+        args.trace_id = _decode(json.loads(path.read_text())["identity"]["config"])["trace_id"]
+    except Exception as exc:
+        raise CheckpointError("Cannot recover checkpoint trace identity") from exc

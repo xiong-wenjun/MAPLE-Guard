@@ -115,3 +115,65 @@ class RecoveryPlanTests(unittest.TestCase):
         new=rewrite_job(job,Path("/fresh/retry"),Path("/new/source"),{"--answer-judge-max-tokens":"1024"})
         command=new["command"]
         self.assertEqual(command[command.index("--answer-judge-max-tokens")+1],"1024")
+
+    def test_new_attempts_enable_durable_checkpoints(self):
+        new=rewrite_job(self.job(),Path("/fresh/retry"),Path("/new/source"),{})
+        self.assertIn("--task-checkpoint-dir",new["command"])
+        self.assertNotIn("--resume-task-checkpoint",new["command"])
+
+    def test_transport_retry_resumes_same_directory_instead_of_replaying_prefix(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            original=self.job();original["seed"]=42
+            lane={"id":"lane","jobs":[original],"credentials":"unused"}
+            launched=[]
+            def run(job,env,lock,ids):
+                launched.append(json.loads(json.dumps(job)))
+                path=Path(job["directory"]);path.mkdir(parents=True,exist_ok=True)
+                cp=path/"task-checkpoints";cp.mkdir(exist_ok=True)
+                (cp/"latest.json").write_text("{}")
+                job.update(status="failed" if len(launched)==1 else "completed",exit_code=1 if len(launched)==1 else 0)
+                (path/"run.json").write_text(json.dumps(job))
+                return job
+            with patch("tools.run_recovery_plan.environment",return_value={}), \
+                 patch("tools.run_recovery_plan.running_directory",return_value=None), \
+                 patch("tools.run_recovery_plan.retryable_failure",return_value=True), \
+                 patch("tools.run_recovery_plan.time.sleep"), \
+                 patch("tools.run_recovery_plan.run_job",side_effect=run):
+                state=run_lane({"recovery_root":str(root)},lane)
+            self.assertEqual(state["status"],"completed")
+            self.assertEqual(len(launched),2)
+            self.assertEqual(launched[0]["directory"],launched[1]["directory"])
+            self.assertIn("--resume-task-checkpoint",launched[1]["command"])
+            self.assertNotIn("--checkpoint-allow-budget-change",launched[1]["command"])
+
+    def test_rewrite_never_carries_resume_flag_to_a_new_directory(self):
+        old=self.job()
+        old["command"]+=["--task-checkpoint-dir","/old/run/original/task-checkpoints","--resume-task-checkpoint","--checkpoint-allow-budget-change"]
+        new=rewrite_job(old,Path("/fresh/retry"),Path("/new/source"),{})
+        self.assertNotIn("--resume-task-checkpoint",new["command"])
+        self.assertNotIn("--checkpoint-allow-budget-change",new["command"])
+
+    def test_new_controller_resumes_an_original_checkpoint_instead_of_allocating_fresh_run(self):
+        from tools.run_recovery_plan import ROOT
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            original=rewrite_job(self.job(),root/"existing",ROOT,{})
+            original["seed"]=42;original["status"]="running"
+            Path(original["directory"]).mkdir()
+            cp=Path(original["directory"])/"task-checkpoints";cp.mkdir()
+            (cp/"latest.json").write_text("{}")
+            (Path(original["directory"])/"run.json").write_text(json.dumps(original))
+            lane={"id":"lane","jobs":[original],"credentials":"unused"}
+            launched=[]
+            def run(job,env,lock,ids):
+                launched.append(job)
+                job.update(status="completed",exit_code=0)
+                return job
+            with patch("tools.run_recovery_plan.environment",return_value={}), \
+                 patch("tools.run_recovery_plan.running_directory",return_value=None), \
+                 patch("tools.run_recovery_plan.run_job",side_effect=run):
+                state=run_lane({"recovery_root":str(root/"new-controller")},lane)
+            self.assertEqual(state["status"],"completed")
+            self.assertEqual(launched[0]["directory"],original["directory"])
+            self.assertIn("--resume-task-checkpoint",launched[0]["command"])

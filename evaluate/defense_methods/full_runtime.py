@@ -181,7 +181,7 @@ def _component_args(args):
     return SimpleNamespace(**{key:value for key,value in vars(args).items()
                              if key.startswith(prefixes) or key in ("method", "agents", "embed_model")})
 
-def _factory(args):
+def _factory(args, checkpoint=None):
     # runtime_scope restores the caller namespace before deferred judge calls.
     method = args.method
     judge_timeout = getattr(args, "full_judge_timeout", None)
@@ -256,7 +256,16 @@ def _factory(args):
                 value = response.json()
             return value["data"][0]["embedding"]
         from .agentsafe_context import make_context_budget
-        guard = AgentSafeFull(public, judge, tracked_client(embed), judge_budget=make_context_budget(args, "judge"))
+        if checkpoint is None:
+            guard = AgentSafeFull(public, judge, tracked_client(embed), judge_budget=make_context_budget(args, "judge"))
+        else:
+            if checkpoint["class"] != "AgentSafeFull":
+                raise ValueError("Checkpoint guard identity mismatch")
+            # Restore frozen criterion vectors without issuing embedding/canary calls.
+            guard = AgentSafeFull.__new__(AgentSafeFull)
+            vars(guard).update(checkpoint["attributes"])
+            guard.judge, guard.embed = judge, tracked_client(embed)
+            guard.judge_budget = make_context_budget(args, "judge")
         required = {str(i) for i in range(int(getattr(args, "agents", 0)))}
         if getattr(args, "preload_haystack", False):
             required.add("-1")

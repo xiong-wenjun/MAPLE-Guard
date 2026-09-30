@@ -12,6 +12,7 @@ retrieved by agents.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import json
 import os
 import random
@@ -293,6 +294,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-every", type=int, default=int(cfg_get(cfg, "experiment.log_every", 5)))
     p.add_argument("--seed", type=int, default=int(cfg_get(cfg, "experiment.seed", 42)))
     ep.add_full_baseline_args(p, cfg)
+    from maple_guard.task_checkpoint import add_checkpoint_args
+    add_checkpoint_args(p)
     args = p.parse_args()
     args.method_explicit = any(arg == "--method" or arg.startswith("--method=") for arg in sys.argv[1:])
     return args
@@ -2134,6 +2137,18 @@ def dump_text_memory(
 
 def main() -> None:
     args = resolve_args(parse_args())
+    from maple_guard.task_checkpoint import run_lock
+    if getattr(args, "task_checkpoint_dir", ""):
+        with run_lock(args):
+            return run_stream(args)
+    if getattr(args, "resume_task_checkpoint", False):
+        raise ValueError("--resume-task-checkpoint requires --task-checkpoint-dir")
+    return run_stream(args)
+
+
+def run_stream(args) -> None:
+    from maple_guard.task_checkpoint import recover_trace_id
+    recover_trace_id(args)
     random.seed(args.seed)
     rows = ep.load_dataset(args.dataset)
     examples = [ep.normalize_example(r, i) for i, r in enumerate(rows)]
@@ -2145,6 +2160,28 @@ def main() -> None:
     trace_id = args.trace_id or f"stream_{int(time.time())}_{args.method}_{args.attack_capability}_{args.attack_variant}"
     args.trace_id = trace_id
     poison_indices = choose_poison_indices(len(task_stream), args)
+
+    checkpoint_enabled = bool(getattr(args, "task_checkpoint_dir", ""))
+    resume = bool(getattr(args, "resume_task_checkpoint", False))
+    if resume and not checkpoint_enabled:
+        raise ValueError("--resume-task-checkpoint requires --task-checkpoint-dir")
+    if checkpoint_enabled and not resume and Path(args.out).exists():
+        raise ValueError("Fresh checkpoint run requires an unused trace path")
+    restored = None
+    if checkpoint_enabled:
+        from maple_guard.task_checkpoint import load_checkpoint, restore_bundle, save_checkpoint
+        if resume:
+            restored = load_checkpoint(args)
+            state = restored["stream_state"]
+            next_index = state["next_task_index"]
+            if (not isinstance(next_index, int) or isinstance(next_index, bool)
+                    or not 0 <= next_index <= len(task_stream)
+                    or len(state["records"]) != next_index
+                    or state["task_ids"] != [task.task_id for task in task_stream]
+                    or state["poison_indices"] != sorted(poison_indices)
+                    or [record["task_index"] for record in state["records"]] != list(range(next_index))
+                    or [record["task_id"] for record in state["records"]] != [task.task_id for task in task_stream[:next_index]]):
+                raise ValueError("Checkpoint task order, schedule or completed prefix does not match")
 
     out_dir = os.path.dirname(args.out)
     if out_dir:
@@ -2160,6 +2197,37 @@ def main() -> None:
     poisoned_memory_origins: Dict[str, int] = {}
     agent_trust: Dict[int, float] = {i: 0.5 for i in range(args.agents)}
     records: List[StreamTaskRecord] = []
+    start_index = 0
+    if restored is not None:
+        restore_bundle(memory_backend, restored)
+        private_memories = memory_backend.private_memories
+        shared_memories = memory_backend.shared_memories
+        state = restored["stream_state"]
+        start_index = state["next_task_index"]
+        records = [StreamTaskRecord(**record) for record in state["records"]]
+        poisoned_memory_targets = state["poison_targets"]
+        poisoned_memory_target_texts = state["poison_target_texts"]
+        poisoned_memory_pattern_texts = state["poison_pattern_texts"]
+        poisoned_memory_origins = state["poison_origins"]
+        agent_trust = {int(k):v for k,v in state["agent_trust"].items()}
+        args._poison_target_cache = state["args_poison_target_cache"]
+        args._poison_target_reason_cache = state["args_poison_target_reason_cache"]
+
+    def checkpoint_state(next_index):
+        return {
+            "next_task_index":next_index,
+            "task_ids":[task.task_id for task in task_stream],
+            "poison_indices":sorted(poison_indices),
+            "records":[asdict(record) for record in records],
+            "poison_targets":poisoned_memory_targets,
+            "poison_target_texts":poisoned_memory_target_texts,
+            "poison_pattern_texts":poisoned_memory_pattern_texts,
+            "poison_origins":poisoned_memory_origins,
+            "agent_trust":agent_trust,
+            "args_poison_target_cache":getattr(args, "_poison_target_cache", {}),
+            "args_poison_target_reason_cache":getattr(args, "_poison_target_reason_cache", {}),
+        }
+
 
     log_progress(
         args,
@@ -2175,8 +2243,14 @@ def main() -> None:
     )
 
     start_time = time.time()
-    with open(args.out, "w", encoding="utf-8") as f:
+    with open(args.out, "a" if resume else "w", encoding="utf-8") as f:
+        if checkpoint_enabled and not resume:
+            f.flush()
+            os.fsync(f.fileno())
+            save_checkpoint(args, memory_backend, checkpoint_state(0), args.out)
         for idx, task in enumerate(task_stream):
+            if idx < start_index:
+                continue
             t0 = time.time()
             record = run_stream_task(
                 trace_id,
@@ -2197,10 +2271,15 @@ def main() -> None:
             update_agent_trust(agent_trust, record, args)
             f.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
             f.flush()
+            if checkpoint_enabled:
+                os.fsync(f.fileno())
+                save_checkpoint(args, memory_backend, checkpoint_state(idx + 1), args.out)
             if args.log_every > 0 and ((idx + 1) % args.log_every == 0 or idx + 1 == len(task_stream)):
                 log_progress(args, short_status(idx, len(task_stream), record, time.time() - t0))
 
     summary = summarize_stream(records, args, poison_indices, poisoned_memory_targets, private_memories, shared_memories, memory_backend, agent_trust)
+    from maple_guard.task_checkpoint import checkpoint_summary
+    summary["task_checkpoint"] = checkpoint_summary(args)
     summary["baseline_provenance"] = ep.baseline_run_provenance(args)
     text_memory_dir = dump_text_memory(args, private_memories, shared_memories, memory_backend, summary)
     summary["text_memory_dir"] = text_memory_dir
