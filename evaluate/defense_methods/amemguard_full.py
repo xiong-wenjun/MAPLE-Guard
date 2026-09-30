@@ -160,12 +160,11 @@ class AMemGuardFull:
 
     @staticmethod
     def _validate_chain(chain):
-        # Preserve the complete generation (including rationale/entity extraction).
-        # Validate the source prompt's structured path, never infer a substitute.
-        if not isinstance(chain, str) or len(chain.split("->")) < 3:
-            raise AMemGuardOutputError("A-MemGuard reasoning output lacks entity -> relation -> entity structure")
-        if any(not part.strip() for part in chain.split("->")):
-            raise AMemGuardOutputError("A-MemGuard reasoning path contains an empty entity/relation")
+        # Upstream forwards complete free text to the joint LLM auditor.
+        # The prompt requests arrows, but their typography is not a safety gate.
+        # Never fabricate a path or bypass the later complete audit.
+        if not isinstance(chain, str) or not chain.strip() or chain.lstrip().startswith("Error:"):
+            raise AMemGuardOutputError("A-MemGuard reasoning output is empty or a provider error")
 
     @staticmethod
     def _judgments(output, count):

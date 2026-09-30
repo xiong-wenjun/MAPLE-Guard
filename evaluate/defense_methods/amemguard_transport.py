@@ -106,7 +106,7 @@ def request_json(base, path, body, key, *, timeout, max_attempts):
             record["will_retry"] = record["retryable_transport_error"] and attempt < max_attempts
             if not record["will_retry"]:
                 raise
-            record["retry_delay_seconds"] = float(attempt)
+            record["retry_delay_seconds"] = 15.0 * 2**(attempt-1)
         finally:
             record["elapsed_seconds"] = time.monotonic() - started
             _journal(record)

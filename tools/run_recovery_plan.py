@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = {"maple_guard.run_appworld", "maple_guard.run_mmlu",
            "maple_guard.run_longmemeval", "maple_guard.infa_memlink_eval"}
-OVERRIDES = {"--chat-timeout", "--pattern-judge-max-tokens", "--max-tokens", "--chat-max-tokens", "--full-judge-timeout"}
+OVERRIDES = {"--chat-timeout", "--pattern-judge-max-tokens", "--max-tokens", "--chat-max-tokens", "--full-judge-timeout", "--full-judge-max-tokens"}
 
 def read(path):
     return json.loads(Path(path).read_text())
@@ -65,6 +65,10 @@ def rewrite_job(job, directory, source, overrides):
             command[command.index(name)+1] = str(value)
         else:
             command += [name, str(value)]
+    if isinstance(new.get("resolved_args"), dict):
+        for name, value in overrides.items():
+            parsed = float(value) if name.endswith("timeout") else int(value)
+            new["resolved_args"][name[2:].replace("-", "_")] = parsed
     # Completion metadata belongs only to the original attempt.
     for name in ("pid", "exit_code", "finished_at", "completed_tasks", "api_usage", "started_at"):
         new.pop(name, None)
@@ -165,7 +169,7 @@ def environment(command, credentials):
         SAFEGUARD_OPENAI_API_KEY=judge.get("api_key",""), EMBED_API_KEY=embed.get("api_key",""),
         MAPLE_SERVICE_CREDENTIALS=str(credentials), PYTHONDONTWRITEBYTECODE="1",
         CUDA_VISIBLE_DEVICES="", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1",
-        HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", AMEMGUARD_TRANSPORT_MAX_ATTEMPTS="3")
+        HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", AMEMGUARD_TRANSPORT_MAX_ATTEMPTS="3", MAPLE_TRANSPORT_MAX_ATTEMPTS="3")
 
 def run_job(job, env, handle, expected_ids):
     directory = Path(job["directory"])

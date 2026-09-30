@@ -165,6 +165,17 @@ class AMemGuardFullTests(unittest.TestCase):
         with self.assertRaises(module.AMemGuardOutputError):
             guard.select("q", [entry("x")], 0)
 
+    def test_complete_free_text_chain_reaches_official_joint_audit(self):
+        for chain in ("Alice → lives in → Paris", "The memory implies that Alice lives in Paris."):
+            with self.subTest(chain=chain):
+                record = entry("one")
+                guard, judge = self.guard([chain], [{"id": 0, "consistent": False, "safe": False}])
+                retained, diagnostics = guard.select("Where does Alice live?", [record], 0)
+                self.assertEqual(retained, [])
+                self.assertIn(chain, judge.calls[-1][-1]["content"])
+                self.assertEqual(diagnostics["paths"][0]["reasoning_chain"], chain)
+                self.assertEqual(guard.state_dict()["lessons"]["0"]["one"]["reasoning_chain"], chain)
+
     def test_empty_candidates_do_not_call_model_or_embedding(self):
         guard, judge = self.guard()
         self.assertEqual(guard.select("q", [], 0)[0], [])
