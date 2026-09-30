@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = {"maple_guard.run_appworld", "maple_guard.run_mmlu",
            "maple_guard.run_longmemeval", "maple_guard.infa_memlink_eval"}
-OVERRIDES = {"--chat-timeout", "--pattern-judge-max-tokens", "--max-tokens", "--chat-max-tokens", "--full-judge-timeout", "--full-judge-max-tokens"}
+OVERRIDES = {"--chat-timeout", "--pattern-judge-max-tokens", "--max-tokens", "--chat-max-tokens", "--full-judge-timeout", "--full-judge-max-tokens", "--answer-judge-max-tokens"}
 
 def read(path):
     return json.loads(Path(path).read_text())
