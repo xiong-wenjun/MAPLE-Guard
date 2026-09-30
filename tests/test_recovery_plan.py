@@ -108,3 +108,10 @@ class RecoveryPlanTests(unittest.TestCase):
         self.assertEqual(new["resolved_args"]["full_judge_max_tokens"],8192)
         self.assertEqual(new["resolved_args"]["chat_timeout"],600.0)
         self.assertEqual(job["resolved_args"]["full_judge_max_tokens"],4096)
+
+    def test_longmemeval_final_adjudicator_budget_uses_answer_judge_flag(self):
+        job=self.job()
+        job["command"]=[x.replace("maple_guard.infa_memlink_eval","maple_guard.run_longmemeval") for x in job["command"]]
+        new=rewrite_job(job,Path("/fresh/retry"),Path("/new/source"),{"--answer-judge-max-tokens":"1024"})
+        command=new["command"]
+        self.assertEqual(command[command.index("--answer-judge-max-tokens")+1],"1024")
