@@ -1253,7 +1253,11 @@ def _run_one_method(ep, records, method, args, contexts):
             "metrics":{k:v for k,v in vars(metrics_acc).items() if k != "args"},
             "stats":{k:v for k,v in vars(stats).items() if k not in {"path","enabled"}},
             "attacker_selected":attacker_selected, "benign_response_slots":benign_response_slots,
-            "official_defense_state":official_defense_state,
+            # Full/comparison runtimes are already captured once by the bundle
+            # codec, including linked memory objects and guard counters. The
+            # native communication callback returns that live runtime as state.
+            # Keep distinct legacy OfficialDefenseState, never its runtime alias.
+            "official_defense_state":None if official_defense_state is current_runtime(method) else official_defense_state,
             "elapsed":time.time()-method_started,
         }
     if checkpoint_enabled and not resume:
