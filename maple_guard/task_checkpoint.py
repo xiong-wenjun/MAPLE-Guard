@@ -261,10 +261,9 @@ def _asset_identity(args):
     return result
 
 
-def build_identity(args):
-    """Fingerprint code bytes, resolved options, input bytes, and relevant environment."""
-    _check_method(args)
-    repo = Path(__file__).resolve().parents[1]
+def source_identity(root=None):
+    """Canonical source map shared by checkpoint validation and command preparation."""
+    repo = Path(root) if root is not None else Path(__file__).resolve().parents[1]
     source = {}
     for name in ("maple_guard", "evaluate"):
         for path in sorted((repo / name).rglob("*.py")):
@@ -273,13 +272,11 @@ def build_identity(args):
         path = repo / name
         if path.is_file():
             source[name] = _hash(path)
-    config = {key: value for key, value in sorted(vars(args).items())
-              if not key.startswith("_") and key not in {"resume_task_checkpoint", "checkpoint_allow_budget_change"}}
-    inputs = {}
-    for key in ("config", "dataset", "benchmark_bundle", "communication_graph", "baseline_config"):
-        value = getattr(args, key, "")
-        if isinstance(value, str) and value and Path(value).is_file():
-            inputs[key] = {"path": str(Path(value).resolve()), "sha256": _hash(value)}
+    return source
+
+
+def prompt_identity(args):
+    """Resolved prompt paths, content hashes and missing fallback identities."""
     # Match the runner's YAML-bundle and four legacy fallback resolutions,
     # including absent files: adding a previously missing fallback changes identity.
     from maple_guard.maple_guard_core import _prompt_dir_from_args, _prompt_file_from_args
@@ -295,6 +292,22 @@ def build_identity(args):
         present = path is not None and path.is_file()
         prompts[name] = {"path": str(path.absolute()) if path is not None else None,
                          "present": present, "sha256": _hash(path) if present else None}
+    return prompts
+
+
+def build_identity(args):
+    """Fingerprint code bytes, resolved options, input bytes, and relevant environment."""
+    _check_method(args)
+    source = source_identity()
+    config = {key: value for key, value in sorted(vars(args).items())
+              if not key.startswith("_") and key not in {"resume_task_checkpoint", "checkpoint_allow_budget_change",
+                  "checkpoint_evaluator_recovery_manifest", "checkpoint_evaluator_recovery_sha256"}}
+    inputs = {}
+    for key in ("config", "dataset", "benchmark_bundle", "communication_graph", "baseline_config"):
+        value = getattr(args, key, "")
+        if isinstance(value, str) and value and Path(value).is_file():
+            inputs[key] = {"path": str(Path(value).resolve()), "sha256": _hash(value)}
+    prompts = prompt_identity(args)
     environment = {key: value for key, value in sorted(os.environ.items())
                    if key.startswith(("CHAT_", "EMBED_", "OPENAI_", "MAPLE_", "FULL_", "SAFEGUARD_", "OFFICIAL_")) or key in ("EMBEDDING_DIM", "MEMOS_BASE_PATH")}
     versions = {"python": sys.version}
@@ -685,7 +698,8 @@ def save_checkpoint(args, bundle, stream_state, trace_path):
                 raise CheckpointError("Trace prefix length does not match completed task boundary")
             manifest = {"schema": SCHEMA, "identity": identity, "paths": specs,
                         "next_task_index": stream_state["next_task_index"], "files": _inventory(stage),
-                        "budget_history":getattr(args,"_checkpoint_budget_history",[])}
+                        "budget_history":getattr(args,"_checkpoint_budget_history",[]),
+                        "source_history":getattr(args,"_checkpoint_source_history",[])}
             _write(stage / "manifest.json", manifest)
             _fsync_dir(stage)
             os.replace(stage, final)
@@ -766,6 +780,11 @@ def load_checkpoint(args, expected_identity=None):
         generation, manifest, runtime = _read_validated(args, expected_identity)
         transition = _budget_transition(manifest["identity"], expected_identity or build_identity(args),
                                         args, manifest["next_task_index"])
+        source_transition = _evaluator_source_transition(manifest["identity"], expected_identity or build_identity(args),
+                                                        args, manifest["next_task_index"])
+        args._checkpoint_source_history = list(manifest.get("source_history",[]))
+        if source_transition:
+            args._checkpoint_source_history.append(source_transition)
         args._checkpoint_budget_history = list(manifest.get("budget_history",[]))
         if transition:
             args._checkpoint_budget_history.append(transition)
@@ -786,7 +805,8 @@ def load_checkpoint(args, expected_identity=None):
                     _copy_path(generation / "disk" / label, stage, sqlite_backup=False)
                     staged[label] = stage
             _private_mkdir(audit)
-            _write(audit / "recovery.json", {"checkpoint": generation.name, "paths": manifest["paths"], "budget_transition":transition})
+            _write(audit / "recovery.json", {"checkpoint": generation.name, "paths": manifest["paths"], "budget_transition":transition,
+                                                  "source_transition":source_transition})
             for label, spec in manifest["paths"].items():
                 destination = Path(spec["path"])
                 if destination.exists():
@@ -815,6 +835,7 @@ def load_checkpoint(args, expected_identity=None):
                 elif stage.exists():
                     stage.unlink()
         return {"stream_state": runtime["stream_state"], "manifest": manifest, "budget_transition":transition,
+                "source_transition":source_transition,
                 "checkpoint_path": str(generation), "failed_attempt_path": str(audit),
                 "_runtime": runtime}
 
@@ -863,11 +884,117 @@ def restore_bundle(bundle, checkpoint_data):
     restore_rng_state(runtime["rng"])
 
 
+# Verified source-map fixture for the frozen 86a8b158 campaign. This gate is
+# intentionally confined to evaluator recovery, not a generic code migration.
+_EVALUATOR_RECOVERY_OLD_SOURCES = {
+    'eb0845601411ba607c57d55f9ee062885c0748a79017cf37722a948b736d0e81':'86a8b158',
+    '6c72c1d07f7c7b89d9e1fdb93af2627697a3ea61c3f12eb5b1be3866403e00f1':'44659df4',
+}
+_EVALUATOR_RECOVERY_FILES = {'maple_guard/budget_outcomes.py','maple_guard/task_checkpoint.py',
+                             'maple_guard/paper_metrics.py','maple_guard/infa_memlink_eval.py'}
+_NATIVE_CHECKPOINT_ALIAS_FIX = {
+    'before':'77715b1067898cf8dd2c0adf9b4494c926dd13a3d55b107a5e1f32d54e23ed9e',
+    'after':'bd219ceface22da0eec4249c0542aef2ad1526870ea9e8a7bebe4833c1ce02e0'}
+
+
+def source_digest(source):
+    return hashlib.sha256(json.dumps(source,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def _prompt_path_relocations(before,after,config,old_snapshot):
+    if set(before) != set(after):
+        raise CheckpointError('Evaluator recovery cannot add or remove prompt fallback identities')
+    relocations = {}
+    for label,old in before.items():
+        new = after[label]
+        if old == new:continue
+        if ({key:value for key,value in old.items() if key != 'path'} !=
+                {key:value for key,value in new.items() if key != 'path'}):
+            raise CheckpointError('Evaluator recovery cannot change prompt content, presence or schema')
+        if (Path(str(config.get('prompt_file',''))).is_absolute() if label == 'bundle' and config.get('prompt_file')
+                else Path(str(config.get('prompt_dir',''))).is_absolute()):
+            raise CheckpointError('Evaluator recovery cannot relocate an external absolute prompt path')
+        paths,roots,relative = [],[],[]
+        for value in (old.get('path'),new.get('path')):
+            if not isinstance(value,str) or not Path(value).is_absolute() or '..' in Path(value).parts:
+                raise CheckpointError('Evaluator prompt relocation requires absolute non-traversing paths')
+            path = _absolute(value)  # Also rejects symlinks in every parent.
+            if path.parts.count('prompts') != 1:
+                raise CheckpointError('Evaluator prompt relocation must stay inside frozen prompts subtrees')
+            index = path.parts.index('prompts')
+            paths.append(path);roots.append(Path(*path.parts[:index]))
+            relative.append(Path(*path.parts[index:]).as_posix())
+            if (type(old.get('present')) is not bool or path.is_file() != old['present']
+                    or (old['present'] and _hash(path) != old.get('sha256'))):
+                raise CheckpointError('Evaluator prompt relocation file presence or hash mismatch')
+        if (relative[0] != relative[1] or roots[0].name != old_snapshot
+                or roots[0].parent.name != 'maple-run-snapshots'
+                or roots[1] != Path(__file__).resolve().parents[1]):
+            raise CheckpointError('Evaluator prompt relocation does not match old/new frozen relative prompt paths')
+        relocations[label] = {'before':str(paths[0]),'after':str(paths[1]),'relative_path':relative[0],
+                              'present':old['present'],'sha256':old.get('sha256')}
+    return relocations
+
+
+def evaluator_recovery_authorization(saved,current):
+    """Construct the exact reviewable source/prompt-path authorization; no mutation."""
+    old,new = dict(saved),dict(current)
+    before,after = old.pop('source'),new.pop('source')
+    old_digest = source_digest(before)
+    if set(before) != set(after) or old_digest not in _EVALUATOR_RECOVERY_OLD_SOURCES:
+        raise CheckpointError('Evaluator recovery requires the verified frozen source fixture')
+    relocations = _prompt_path_relocations(old.pop('prompts'),new.pop('prompts'),
+                    _decode(old['config']),_EVALUATOR_RECOVERY_OLD_SOURCES[old_digest])
+    if old != new:
+        raise CheckpointError('Evaluator recovery cannot change config, budgets, inputs, environment, prompts or assets')
+    changes = {key:{'before':before[key],'after':after[key]} for key in before if before[key] != after[key]}
+    if (not changes or set(changes) - _EVALUATOR_RECOVERY_FILES
+            or not {'maple_guard/budget_outcomes.py','maple_guard/task_checkpoint.py','maple_guard/paper_metrics.py'} <= set(changes)):
+        raise CheckpointError('Evaluator recovery includes an unrelated source change')
+    if changes.get('maple_guard/infa_memlink_eval.py',_NATIVE_CHECKPOINT_ALIAS_FIX) != _NATIVE_CHECKPOINT_ALIAS_FIX:
+        raise CheckpointError('Evaluator recovery includes an unapproved native runner change')
+    return {'schema':1,'purpose':'external_evaluator_pending_recovery',
+            'source_before_sha256':old_digest,'source_after_sha256':source_digest(after),
+            'changes':changes,'prompt_path_relocations':relocations}
+
+
+def _evaluator_source_transition(saved,current,args,index):
+    if saved.get('source') == current.get('source'):
+        return None
+    path = getattr(args,'checkpoint_evaluator_recovery_manifest','')
+    authorized_hash = getattr(args,'checkpoint_evaluator_recovery_sha256','')
+    if not path or not re.fullmatch(r'[0-9a-f]{64}',authorized_hash or ''):
+        raise CheckpointError('Checkpoint source/config/input/environment identity mismatch; evaluator recovery authorization required')
+    if (not getattr(args,'resume_task_checkpoint',False) or index <= 0
+            or getattr(args,'task_mode','') != 'qa'
+            or getattr(args,'response_budget_policy','') != 'fail_task'):
+        raise CheckpointError('Evaluator recovery requires a nonzero fail_task QA checkpoint resume')
+    expected = evaluator_recovery_authorization(saved,current)
+    try:
+        manifest_path = _absolute(path)
+        if manifest_path.is_symlink() or _hash(manifest_path) != authorized_hash:
+            raise CheckpointError('Evaluator recovery authorization manifest hash mismatch')
+        authorization = json.loads(manifest_path.read_text())
+    except CheckpointError:
+        raise
+    except (OSError,ValueError) as exc:
+        raise CheckpointError('Invalid evaluator recovery authorization manifest') from exc
+    if authorization != expected:
+        raise CheckpointError('Evaluator recovery authorization does not match exact source bytes and prompt path relocation')
+    return {'protocol':'external_evaluator_pending_recovery','next_task_index':index,
+            'authorization_manifest':str(manifest_path),'authorization_sha256':authorized_hash,
+            **expected,'preserved_task_memory_and_runtime_state':True,
+            'reporting_change':'auxiliary pending no longer invalidates independently observed primary metrics'}
+
+
 _BUDGET_FIELDS = {"chat_max_tokens","max_tokens","pattern_judge_max_tokens",
                   "full_judge_max_tokens","answer_judge_max_tokens"}
 
 def _budget_transition(saved, current, args, index):
     if saved == current:
+        return None
+    if saved.get("source") != current.get("source"):
+        _evaluator_source_transition(saved,current,args,index)
         return None
     if not getattr(args,"checkpoint_allow_budget_change",False):
         raise CheckpointError("Checkpoint source/config/input/environment identity mismatch")
@@ -899,13 +1026,19 @@ def add_checkpoint_args(parser):
     parser.add_argument("--task-checkpoint-dir", default="",
                         help="Durable task boundaries; recovery plans enable this for new attempts.")
     parser.add_argument("--resume-task-checkpoint", action="store_true")
+    parser.add_argument("--checkpoint-evaluator-recovery-manifest",default="",
+                        help="Operator-approved exact source authorization for nonzero frozen evaluator recovery.")
+    parser.add_argument("--checkpoint-evaluator-recovery-sha256",default="",
+                        help="Explicit SHA256 authorization of the evaluator-recovery manifest.")
     parser.add_argument("--checkpoint-allow-budget-change", action="store_true",
                         help="Explicitly permit and record a token-budget transition on resume.")
 
 def checkpoint_summary(args):
     return {"enabled":bool(getattr(args,"task_checkpoint_dir","")),
             "budget_history":getattr(args,"_checkpoint_budget_history",[]),
-            "uniform_budget":not bool(getattr(args,"_checkpoint_budget_history",[]))}
+            "uniform_budget":not bool(getattr(args,"_checkpoint_budget_history",[])),
+            "source_history":getattr(args,"_checkpoint_source_history",[]),
+            "uniform_source":not bool(getattr(args,"_checkpoint_source_history",[]))}
 
 
 def recover_trace_id(args):
