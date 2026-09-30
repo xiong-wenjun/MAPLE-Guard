@@ -11,6 +11,7 @@ retrieved by agents.
 
 from __future__ import annotations
 from maple_guard import budget_outcomes as budget
+from maple_guard import paper_metrics as paper
 
 import argparse
 from pathlib import Path
@@ -86,6 +87,8 @@ class StreamTaskRecord:
     response_budget_policy: str = "strict"
     budget_outcomes_version: int = 1
     outcome: str = "completed"
+    paper_round_observations: List[Dict[str, Any]] = field(default_factory=list)
+    paper_correctness_kind: str = "native_task_correctness"
     feedback_incomplete: bool = False
     budget_failures: List[Dict[str, Any]] = field(default_factory=list)
     pending_evaluators: List[Dict[str, Any]] = field(default_factory=list)
@@ -1469,6 +1472,7 @@ def compute_benign_round_effects(
 
 
 @ep.scoped_baseline
+@paper.task_observation("mmlu")
 @budget.task_boundary(StreamTaskRecord)
 def run_stream_task(
     trace_id: str,
@@ -1749,6 +1753,7 @@ def run_stream_task(
     )
 
 
+@paper.summary("mmlu")
 @budget.outcome_summary("mmlu")
 def summarize_stream(
     records: Sequence[StreamTaskRecord],

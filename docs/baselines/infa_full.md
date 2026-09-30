@@ -67,6 +67,21 @@ Required settings are `--infa-code-dir`, `--infa-checkpoint`, and positive `--ag
 
 On the audited server, no compatible trained native checkpoint was found in the relevant MAPLE/official-INFA trees. A real run also requires MiniLM assets, reachable configured services and benchmark data. Passing construction or software tests does not establish detection accuracy or paper reproduction.
 
+## Native InjecAgent evaluator dependency
+
+Native TA evaluation imports the released `utils.evaluation_utils` and
+`utils.text_utils`; repetition detection uses `nltk.ngrams`. The pinned INFA
+source's `requirements.txt` specifies **`nltk==3.9.2`**. Install that exact package
+in the evaluation runtime without changing the other baseline dependencies:
+
+```bash
+python -m pip install --no-deps nltk==3.9.2
+```
+
+The local n-gram check requires no NLTK corpus download. Verify the real official
+TA evaluator import and a `succ`/`unsucc` verdict before launching native bundle
+runs; mocked unit-test verdicts do not prove environment readiness.
+
 ## Verification
 
 Tests exercise released first-turn donation and untouched EMA, later cutoff behavior, float32 cutoff/EMA semantics, continued generation with blocked senders, task reset, text correction and source fallback. Explicit reconstruction tests preserve the previous behavior. Native fixture tests check strict two-head loading, train/eval choices, graph tensors and incompatible signatures without downloading assets.

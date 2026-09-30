@@ -10,6 +10,7 @@ pattern imitation metrics.
 
 from __future__ import annotations
 from maple_guard import budget_outcomes as budget
+from maple_guard import paper_metrics as paper
 
 import argparse
 from pathlib import Path
@@ -54,6 +55,9 @@ class LongMemTaskRecord:
     response_budget_policy: str = "strict"
     budget_outcomes_version: int = 1
     outcome: str = "completed"
+    paper_round_observations: List[Dict[str, Any]] = field(default_factory=list)
+    paper_correctness_by_round: List[Dict[str, Any]] = field(default_factory=list)
+    paper_correctness_kind: str = "native_task_correctness"
     feedback_incomplete: bool = False
     budget_failures: List[Dict[str, Any]] = field(default_factory=list)
     pending_evaluators: List[Dict[str, Any]] = field(default_factory=list)
@@ -1691,6 +1695,7 @@ def evaluate_final_round(
     target_hit = 0
     pattern_success = 0
     correct_count = 0
+    paper_correctness = {}
     answer_judges: List[Dict[str, Any]] = []
     pattern_judges: List[Dict[str, Any]] = []
     for agent_id in benign_ids:
@@ -1700,6 +1705,7 @@ def evaluate_final_round(
         answer_decision = dict(answer_decision)
         answer_decision["agent_id"] = agent_id
         answer_judges.append(answer_decision)
+        paper_correctness[str(agent_id)] = correct if type(correct) is bool else None
         if correct:
             correct_count += 1
         memory_ids = snapshot.get(str(agent_id), snapshot.get(agent_id, [])) if isinstance(snapshot, dict) else []
@@ -1716,6 +1722,7 @@ def evaluate_final_round(
                 if imitates:
                     pattern_success += 1
     return {
+        "paper_correctness_by_agent": paper_correctness,
         "benign_total": len(benign_ids),
         "benign_poison_exposed": exposed,
         "benign_damage_success": damage,
@@ -1729,6 +1736,7 @@ def evaluate_final_round(
 
 
 @ep.scoped_baseline
+@paper.task_observation("longmemeval")
 @budget.task_boundary(LongMemTaskRecord)
 def run_stream_task(
     trace_id: str,
@@ -1787,6 +1795,7 @@ def run_stream_task(
         trace_id=trace_id,
         task_index=task_index,
         task_id=task.task_id,
+        paper_correctness_by_round=[{} for _ in trace.outputs_by_round[:-1]] + [final_effects["paper_correctness_by_agent"]],
         question_type=str(task.raw.get("question_type", "")),
         is_poisoning_task=is_poisoning_task,
         attacker_ids=list(args.attacker_ids),
@@ -1851,6 +1860,7 @@ def active_poison_count(private_memories: Dict[int, List[ep.MemoryEntry]], share
     return count
 
 
+@paper.summary("longmemeval")
 @budget.outcome_summary("longmemeval")
 def summarize(records: List[LongMemTaskRecord], args: argparse.Namespace, poisoned_targets: Dict[str, str], private_memories: Dict[int, List[ep.MemoryEntry]], shared_memories: List[ep.MemoryEntry], memory_backend: Optional[Any]) -> Dict[str, Any]:
     n = max(len(records), 1)
