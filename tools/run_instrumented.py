@@ -14,6 +14,7 @@ class BenchmarkResponseError(SystemExit):
 
 def install_metrics(path, fail_on_truncation=False):
     import requests
+    from maple_guard import budget_outcomes as budget
     maximum = int(os.getenv("MAPLE_TRANSPORT_MAX_ATTEMPTS", "1"))
     if maximum not in (1, 2, 3):
         raise ValueError("MAPLE_TRANSPORT_MAX_ATTEMPTS must be 1, 2, or 3")
@@ -32,11 +33,13 @@ def install_metrics(path, fail_on_truncation=False):
                     "max_tokens":payload.get("max_tokens"),"temperature":payload.get("temperature"),
                     "request_bytes":len(body),"message_count":len(payload.get("messages",[])),
                     "timestamp":time.time(),"request_id":request_id,"attempt":attempt,
-                    "max_attempts":maximum,"will_retry":False}
+                    "max_attempts":maximum,"will_retry":False, **budget.request_audit(),
+                    "messages_sha256":budget.messages_hash(payload.get("messages", []))}
             invalid_response=False
             try:
                 response=original(self,request,**kwargs)
                 record["http_status"]=response.status_code
+                response._maple_request_id=request_id
                 transient=response.status_code==429 or 500<=response.status_code<=599
                 if transient and attempt < maximum:
                     record["will_retry"]=True
@@ -54,12 +57,15 @@ def install_metrics(path, fail_on_truncation=False):
                         missing_final=parsed.path.endswith("/chat/completions") and response.status_code==200 and (not choices or not all(record["final_content_present"]))
                         invalid_response=truncated or missing_final
                         record["invalid_for_benchmark"]=invalid_response
+                        record["invalid_response_type"]="length" if truncated else "empty_final" if missing_final else None
                     return response
             except Exception as exc:
                 record["error_type"]=type(exc).__name__
                 transient=isinstance(exc,(requests.Timeout,requests.ConnectionError,requests.exceptions.ChunkedEncodingError))
                 record["will_retry"]=transient and attempt < maximum
                 if not record["will_retry"]:
+                    if budget.enabled():
+                        raise budget.RecoverableProviderError("Provider transport failed (" + type(exc).__name__ + "); recover last task checkpoint") from exc
                     raise
             finally:
                 record["elapsed_seconds"]=time.monotonic()-started
@@ -68,9 +74,13 @@ def install_metrics(path, fail_on_truncation=False):
                 fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
                 try:os.write(fd,(json.dumps(record,ensure_ascii=False)+"\n").encode())
                 finally:os.close(fd)
+                budget.note_request(record)
+                if invalid_response and budget.enabled():
+                    budget.handle_response(data, payload, request_id=request_id, endpoint=request.url, timeout=kwargs.get("timeout"))
                 if invalid_response and fail_on_truncation:
                     raise BenchmarkResponseError("Model response reached its token limit or lacks final content; inspect api-calls.jsonl before rerunning")
             time.sleep(record["retry_delay_seconds"])
+    send.maple_instrumented=True
     requests.sessions.Session.send=send
     return original
 

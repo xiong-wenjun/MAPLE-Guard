@@ -1,6 +1,7 @@
 """Minimal OpenAI-compatible safeguard client used by official baselines."""
 
 from __future__ import annotations
+from maple_guard import budget_outcomes as budget
 
 import json
 import os
@@ -27,6 +28,7 @@ def safeguard_config(args: Any) -> tuple[str, str, str]:
     return str(base_url or ""), str(model or ""), str(api_key or "")
 
 
+@budget.role_call("defense")
 def chat_completion(
     args: Any,
     messages: List[Dict[str, str]],
@@ -52,9 +54,15 @@ def chat_completion(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    resp = requests.post(f"{base_url.rstrip('/')}/chat/completions", headers=headers, json=payload, timeout=120)
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        resp = requests.post(f"{base_url.rstrip('/')}/chat/completions", headers=headers, json=payload, timeout=120)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        if budget.enabled():
+            raise budget.RecoverableProviderError("Internal defense provider failed (" + type(exc).__name__ + "); recover last task checkpoint") from exc
+        raise
+    budget.handle_response(data, payload, request_id=getattr(resp, "_maple_request_id", None), endpoint=base_url.rstrip("/") + "/chat/completions", timeout=120)
     return data["choices"][0]["message"]["content"]
 
 

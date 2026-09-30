@@ -161,6 +161,29 @@ class AMemGuardTransportTests(unittest.TestCase):
             self.assertEqual(network.call_count, 1)
             self.assertEqual(network.call_args.kwargs["timeout"], 120)
 
+    def test_opt_in_defense_length_uses_same_committed_journal_identity(self):
+        from maple_guard import budget_outcomes as budget
+        args=arguments(response_budget_policy='fail_task',agents=2,attacker_ids=[1])
+        judge,_=model_clients(args)
+        with budget.task_scope(args,'task-t',poison_texts={}) as audit:
+            with mock.patch('urllib.request.urlopen',return_value=reply('partial','length')):
+                with self.assertRaises(budget.BudgetExceeded) as caught:judge([])
+        record=self.records()[-1]
+        event=caught.exception.event
+        for field in ('request_id','task_id','role','response_budget_policy','budget_outcomes_version','invalid_response_type'):
+            self.assertEqual(record[field],event[field])
+        self.assertEqual(record['role'],'defense')
+        self.assertEqual(len(audit.requests),1)
+
+    def test_opt_in_transport_failure_cannot_be_swallowed_by_method(self):
+        from maple_guard import budget_outcomes as budget
+        args=arguments(response_budget_policy='fail_task',agents=2,attacker_ids=[1])
+        judge,_=model_clients(args)
+        guard=AMemGuardFull(args,judge,lambda text:[1.,0.])
+        with budget.task_scope(args,'task-t',poison_texts={}),mock.patch('urllib.request.urlopen',side_effect=TimeoutError()) as network:
+            with self.assertRaises(budget.RecoverableProviderError):guard._ask('query','reasoning path')
+        self.assertEqual(network.call_count,3)
+
     def test_invalid_transport_config_rejected_before_network(self):
         for timeout in (0, -1, float("nan"), float("inf"), "invalid"):
             with self.subTest(timeout=timeout), mock.patch("urllib.request.urlopen") as network:

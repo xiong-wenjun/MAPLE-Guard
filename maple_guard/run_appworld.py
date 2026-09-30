@@ -200,6 +200,8 @@ def add_appworld_summary(summary: Dict[str, Any], records: Sequence[stream.Strea
 
 def main() -> None:
     args = stream.resolve_args(parse_args())
+    from maple_guard import budget_outcomes as budget
+    budget.configure_policy(args)
     if getattr(args, "task_checkpoint_dir", ""):
         from maple_guard.task_checkpoint import run_lock
         with run_lock(args):
@@ -208,6 +210,8 @@ def main() -> None:
 
 
 def run_stream(args: argparse.Namespace) -> None:
+    from maple_guard.budget_outcomes import configure_policy
+    configure_policy(args)
     from maple_guard.task_checkpoint import recover_trace_id
     recover_trace_id(args)
     random.seed(args.seed)
@@ -222,6 +226,7 @@ def run_stream(args: argparse.Namespace) -> None:
         raise ValueError("Empty AppWorld task stream")
     poison_indices: Set[int] = stream.choose_poison_indices(len(task_stream), args)
 
+    args._planned_task_count = len(task_stream)
     checkpoint_enabled = bool(getattr(args, "task_checkpoint_dir", ""))
     resume = bool(getattr(args, "resume_task_checkpoint", False))
     if resume and not checkpoint_enabled:

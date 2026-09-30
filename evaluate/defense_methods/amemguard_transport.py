@@ -15,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from maple_guard import budget_outcomes as budget
 
 
 def max_attempts_from_environment():
@@ -67,6 +68,7 @@ def _response_metadata(record, data):
         and bool(message["content"].strip()) for message in messages]
     record["reasoning_content_present"] = [
         isinstance(message, dict) and bool(message.get("reasoning_content")) for message in messages]
+    record["invalid_response_type"] = "length" if "length" in record["finish_reasons"] else "empty_final" if record["endpoint"].endswith("/chat/completions") and (not choices or not all(record["final_content_present"])) else None
     record["invalid_for_benchmark"] = (
         "length" in record["finish_reasons"]
         or (record["endpoint"].endswith("/chat/completions")
@@ -89,13 +91,16 @@ def request_json(base, path, body, key, *, timeout, max_attempts):
             "request_bytes": len(request.data), "message_count": len(body.get("messages", [])),
             "timestamp": time.time(), "component": "amemguard_full", "transport": "urllib",
             "request_id": request_id, "attempt": attempt, "max_attempts": max_attempts,
-            "timeout_seconds": timeout, "will_retry": False,
+            "timeout_seconds": timeout, "will_retry": False, **budget.request_audit(),
+            "messages_sha256":budget.messages_hash(body.get("messages", [])),
         }
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 record["http_status"] = getattr(response, "status", 200)
                 data = json.load(response)
             _response_metadata(record, data)
+            if budget.enabled() and isinstance(data, dict):
+                data["_maple_request_id"] = request_id
             return data
         except Exception as error:
             record["error_type"] = type(error).__name__
@@ -105,9 +110,14 @@ def request_json(base, path, body, key, *, timeout, max_attempts):
             record["retryable_transport_error"] = _transient(error)
             record["will_retry"] = record["retryable_transport_error"] and attempt < max_attempts
             if not record["will_retry"]:
+                if budget.enabled():
+                    raise budget.RecoverableProviderError("A-MemGuard provider failed (" + type(error).__name__ + "); recover last task checkpoint") from error
                 raise
             record["retry_delay_seconds"] = 15.0 * 2**(attempt-1)
         finally:
             record["elapsed_seconds"] = time.monotonic() - started
             _journal(record)
+            budget.note_request(record)
+            if record.get("invalid_for_benchmark") and budget.enabled():
+                budget.handle_response(data, body, request_id=request_id, endpoint=request.full_url, timeout=timeout)
         time.sleep(record["retry_delay_seconds"])
