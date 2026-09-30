@@ -34,6 +34,16 @@ class RecoveryPlanTests(unittest.TestCase):
             with self.subTest(flag=flag),self.assertRaises(ValueError):
                 rewrite_job(self.job(),Path("/fresh/retry"),Path("/new/source"),{flag:"different"})
 
+    def test_fresh_rewrite_accepts_only_explicit_string_response_policy(self):
+        job=self.job();job['resolved_args']={'response_budget_policy':'strict'}
+        new=rewrite_job(job,Path('/fresh/retry'),Path('/new/source'),{'--response-budget-policy':'fail_task'})
+        self.assertEqual(new['resolved_args']['response_budget_policy'],'fail_task')
+        self.assertEqual(new['command'][new['command'].index('--response-budget-policy')+1],'fail_task')
+        self.assertNotIn('--resume-task-checkpoint',new['command'])
+        self.assertEqual(job['resolved_args']['response_budget_policy'],'strict')
+        with self.assertRaises(ValueError):
+            rewrite_job(job,Path('/fresh/retry'),Path('/new/source'),{'--response-budget-policy':'relaxed'})
+
     def test_lane_lock_prevents_duplicate_controller(self):
         with tempfile.TemporaryDirectory() as folder:
             with lane_lock(Path(folder)/"lane.lock"):
@@ -51,6 +61,19 @@ class RecoveryPlanTests(unittest.TestCase):
             self.assertFalse(retryable_failure(root))
             api.write_text(json.dumps({"error_type":"ReadTimeout"})+"\n")
             log.write_text("AttributeError: missing configuration")
+            self.assertFalse(retryable_failure(root))
+
+    def test_transport_after_committed_budget_failure_remains_recoverable(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            event={'response_budget_policy':'fail_task','budget_outcomes_version':1,'request_id':'r','task_id':'t','role':'task','request_scope':'primary','invalid_response_type':'length','finish_reasons':['length']}
+            row={'response_budget_policy':'fail_task','budget_outcomes_version':1,'task_id':'t','outcome':'budget_exhausted','is_correct':False,'budget_failures':[event]}
+            (root/'trace.jsonl').write_text(json.dumps(row)+'\n')
+            (root/'run.log').write_text('ReadTimeout: recover last task checkpoint')
+            (root/'api-calls.jsonl').write_text(json.dumps({**event,'invalid_for_benchmark':True})+'\n'+json.dumps({'error_type':'ReadTimeout'})+'\n')
+            self.assertTrue(retryable_failure(root))
+            row['budget_failures'][0]['request_id']='forged'
+            (root/'trace.jsonl').write_text(json.dumps(row)+'\n')
             self.assertFalse(retryable_failure(root))
 
     def test_completed_result_requires_matching_task_order_and_valid_responses(self):

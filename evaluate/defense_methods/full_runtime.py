@@ -4,6 +4,7 @@ Only operational identities and plain text cross the component boundary. The
 runner keeps task labels, private system prompts and attack roles outside it.
 """
 from __future__ import annotations
+from maple_guard import budget_outcomes as budget
 
 import contextlib
 import contextvars
@@ -124,7 +125,7 @@ def tracked_client(function):
         counters["calls"] += 1
         try:
             return function(*args, **kwargs)
-        except (Exception, SystemExit):
+        except (Exception, SystemExit, budget.BudgetExceeded):
             counters["errors"] += 1
             raise
         finally:
@@ -197,6 +198,7 @@ def _factory(args, checkpoint=None):
     judge_timeout = _positive_judge_timeout(judge_timeout)
     if not (getattr(args, "full_judge_base_url", "") or getattr(args, "chat_base_url", "")) or not (getattr(args, "full_judge_model", "") or getattr(args, "chat_model", "")):
         raise ValueError("A full judge base URL and model (or chat URL/model) are required")
+    @budget.role_call("defense")
     def judge(messages, *, temperature=0.0, response_format="json_object"):
         import requests
         base = getattr(args, "full_judge_base_url", "") or getattr(args, "chat_base_url", "")
@@ -223,6 +225,7 @@ def _factory(args, checkpoint=None):
                                json=payload, headers=headers, timeout=judge_timeout) as response:
                 response.raise_for_status()
                 result = response.json()
+            budget.handle_response(result, payload, request_id=getattr(response, "_maple_request_id", None), endpoint=base.rstrip("/") + "/chat/completions", timeout=judge_timeout)
             choice = result["choices"][0]
             if choice.get("finish_reason") == "length":
                 raise RuntimeError("Full baseline judge output was truncated")
@@ -232,6 +235,8 @@ def _factory(args, checkpoint=None):
                 raise RuntimeError("Full baseline judge returned no final content")
             return content
         except Exception as exc:
+            if budget.enabled():
+                raise budget.RecoverableProviderError("Internal defense provider failed (" + type(exc).__name__ + "); recover last task checkpoint") from exc
             if getattr(args, "strict_comparison", False):
                 raise FullBaselineProviderError(
                     f"Full baseline judge failed ({type(exc).__name__}); "

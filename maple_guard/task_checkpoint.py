@@ -894,6 +894,8 @@ def _budget_transition(saved, current, args, index):
 
 
 def add_checkpoint_args(parser):
+    from maple_guard.budget_outcomes import add_budget_args
+    add_budget_args(parser)
     parser.add_argument("--task-checkpoint-dir", default="",
                         help="Durable task boundaries; recovery plans enable this for new attempts.")
     parser.add_argument("--resume-task-checkpoint", action="store_true")

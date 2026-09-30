@@ -17,6 +17,7 @@ Memory lifecycle:
 from __future__ import annotations
 
 import argparse
+from maple_guard import budget_outcomes as budget
 import hashlib
 import importlib
 import json
@@ -609,14 +610,29 @@ def hash_embedding(text: str, dim: int = 256) -> List[float]:
 
 def remote_embedding(text: str, base_url: str, model: str, timeout: int = 60) -> Optional[List[float]]:
     if requests is None:
+        if budget.enabled():
+            raise budget.RecoverableProviderError("Embedding provider is unavailable; no scored task outcome")
         return None
-    try:
-        from maple_guard.providers.service_auth import embedding_headers
-        resp = requests.post(f"{base_url.rstrip('/')}/embeddings", headers=embedding_headers(base_url), json={"model": model, "input": text}, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()["data"][0]["embedding"]
-    except Exception:
-        return None
+    from maple_guard.providers.service_auth import embedding_headers
+    attempts = 1
+    if budget.enabled() and not getattr(requests.sessions.Session.send, "maple_instrumented", False):
+        attempts = int(os.getenv("MAPLE_TRANSPORT_MAX_ATTEMPTS", "3"))
+        if attempts not in (1, 2, 3):
+            raise ValueError("MAPLE_TRANSPORT_MAX_ATTEMPTS must be 1, 2, or 3")
+    payload = {"model": model, "input": text}
+    for attempt in range(attempts):
+        try:
+            resp = requests.post(f"{base_url.rstrip('/')}/embeddings", headers=embedding_headers(base_url), json=payload, timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()["data"][0]["embedding"]
+        except Exception as exc:
+            if not budget.enabled():
+                return None
+            transient = isinstance(exc, (requests.Timeout, requests.ConnectionError, requests.exceptions.ChunkedEncodingError)) or (isinstance(exc, requests.HTTPError) and exc.response is not None and (exc.response.status_code == 429 or 500 <= exc.response.status_code <= 599))
+            if transient and attempt < attempts - 1:
+                time.sleep(15.0 * 2**attempt)
+                continue
+            raise budget.RecoverableProviderError("Embedding provider failed (" + type(exc).__name__ + "); recover last task checkpoint") from exc
 
 
 def cosine(a: Sequence[float], b: Sequence[float]) -> float:
@@ -1512,6 +1528,7 @@ def official_communication_decisions_to_trace(
     return out
 
 
+@budget.role_call("defense")
 def apply_official_communication_defense_to_outputs(
     method: str,
     current_outputs: Dict[int, Any],
@@ -2110,8 +2127,14 @@ def call_chat(
         payload["chat_template_kwargs"] = chat_template_kwargs
     elif os.getenv("CHAT_DISABLE_THINKING") == "1":
         payload["chat_template_kwargs"] = {"enable_thinking": False}
+    from maple_guard import budget_outcomes as budget
     last_error = None
-    for attempt in range(8):
+    attempts = 8
+    if budget.enabled():
+        attempts = 1 if getattr(requests.sessions.Session.send, "maple_instrumented", False) else int(os.getenv("MAPLE_TRANSPORT_MAX_ATTEMPTS", "3"))
+        if attempts not in (1, 2, 3):
+            raise ValueError("MAPLE_TRANSPORT_MAX_ATTEMPTS must be 1, 2, or 3")
+    for attempt in range(attempts):
         try:
             resp = requests.post(
                 f"{base_url.rstrip('/')}/chat/completions",
@@ -2131,13 +2154,24 @@ def call_chat(
             if getattr(exc, "fatal_for_benchmark", False):
                 raise
             if isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code in (400, 401, 403, 404, 413, 422):
+                if budget.enabled():
+                    raise budget.RecoverableProviderError("Provider configuration/authentication failure (HTTPError); no scored task outcome") from exc
                 raise
-            if attempt == 7:
+            if attempt == attempts - 1:
+                if budget.enabled():
+                    raise budget.RecoverableProviderError("Provider failed (" + type(exc).__name__ + "); recover last task checkpoint") from exc
                 raise
             time.sleep(min(30, 2 ** attempt))
     else:
         raise RuntimeError(f"chat completion failed: {last_error}")
-    message = resp.json()["choices"][0].get("message") or {}
+    try:
+        data = resp.json()
+    except Exception as exc:
+        if budget.enabled():
+            raise budget.RecoverableProviderError("Provider response integrity failure (" + type(exc).__name__ + "); recover last task checkpoint") from exc
+        raise
+    budget.handle_response(data, payload, request_id=getattr(resp, "_maple_request_id", None), endpoint=base_url.rstrip("/") + "/chat/completions", timeout=timeout)
+    message = data["choices"][0].get("message") or {}
     content = message.get("content")
     if content is None:
         # Some Qwen-compatible vLLM endpoints place the answer in
@@ -2626,6 +2660,7 @@ def commit_pre_round_memory_handoffs(
     """
     ids_by_source: Dict[str, List[str]] = {}
     decisions: List[DefenseDecision] = []
+    budget.capture_partial(pre_round_memory_handoff_ids=ids_by_source, handoff_defense_decisions=decisions)
     evaluator_poison_ids = set(str(x) for x in (getattr(args, "_evaluator_poison_memory_ids", []) or []))
     for src_agent_id, memories in selected_by_agent.items():
         runtime = current_runtime(args.method)
@@ -2685,6 +2720,7 @@ def commit_pre_round_memory_handoffs(
                 ids_by_source.setdefault(str(src_agent_id), []).append(entry.memory_id)
                 if evaluator_poison_source:
                     ids_by_source.setdefault("__poison__", []).append(entry.memory_id)
+                    budget.register_poison_entries([entry.memory_id], [entry])
     return ids_by_source, decisions
 
 
@@ -2900,13 +2936,16 @@ def run_task(
     memory_backend: Optional[Any] = None,
 ) -> Tuple[TaskRunTrace, Dict[int, List[MemoryEntry]], List[RetrievalDecision], List[DefenseDecision]]:
     adj = build_adj_matrix(args.communication_topology, args.agents, args.seed, getattr(args, "communication_sparsity", None))
+    from maple_guard import budget_outcomes as budget
     outputs_by_round: List[Dict[int, str]] = []
+    budget.capture_partial(outputs_by_round=outputs_by_round)
     selected_by_agent: Dict[int, List[MemoryEntry]] = {i: [] for i in range(args.agents)}
     previous_selected_by_agent: Dict[int, List[MemoryEntry]] = {i: [] for i in range(args.agents)}
     round_selected_memory_ids: List[Dict[str, List[str]]] = []
     round_memory_ids_by_source: Dict[str, List[str]] = {}
     all_retrieval_decisions: List[RetrievalDecision] = []
     all_defense_decisions: List[DefenseDecision] = []
+    budget.capture_partial(retrieval_decisions=all_retrieval_decisions, defense_decisions=all_defense_decisions)
     official_defense_state = None
     runtime = current_runtime(args.method)
     if runtime is not None:
@@ -2944,6 +2983,7 @@ def run_task(
                 shared_memories,
                 memory_backend,
             )
+            budget.register_poison_entries(handoff_ids.get("__poison__", []), [m for values in private_memories.values() for m in values] + list(shared_memories))
             all_defense_decisions.extend(handoff_dds)
             for src_agent_id, ids in handoff_ids.items():
                 round_memory_ids_by_source.setdefault(src_agent_id, []).extend(ids)
@@ -2970,6 +3010,7 @@ def run_task(
         })
 
         current_outputs: Dict[int, str] = {}
+        budget.capture_partial(partial_round=r + 1, partial_round_outputs=current_outputs, round_selected_memory_ids=round_selected_memory_ids, round_memory_ids_by_source=round_memory_ids_by_source)
         for agent_id in range(args.agents):
             memory_context = render_memory_context(selected_by_agent.get(agent_id, []), args.method)
             system = agent_system_prompt(
@@ -2989,16 +3030,22 @@ def run_task(
                 user += peer_context(outputs_by_round[-1], adj, agent_id)
             try:
                 messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-                def generate(messages):
-                    return call_chat(
-                        args.chat_base_url, args.chat_model, messages,
-                        chat_template_kwargs={"enable_thinking": False} if bool(getattr(args, "disable_chat_thinking", False)) else None,
-                    )
+                segments = budget.rendered_poison_segments(selected_by_agent.get(agent_id, []), compact=any(str(getattr(m, "source_type", "")) == "longmemeval_user_history_seed" for m in selected_by_agent.get(agent_id, [])))
+                def generate(messages, _agent_id=agent_id, _round=r, _segments=segments):
+                    budget.observe_input(_agent_id, _round + 1, messages, _segments)
+                    with budget.role_scope("task"):
+                        return call_chat(
+                            args.chat_base_url, args.chat_model, messages,
+                            chat_template_kwargs={"enable_thinking": False} if bool(getattr(args, "disable_chat_thinking", False)) else None,
+                        )
                 out = runtime.generate(agent_id, messages, generate) if runtime is not None else generate(messages)
                 if out is None:
+                    budget.observe_inactive(agent_id, r + 1)
                     selected_by_agent[agent_id] = []
                     continue
             except Exception as exc:
+                if budget.enabled():
+                    raise budget.RecoverableProviderError("Task provider failed (" + type(exc).__name__ + "); recover last task checkpoint") from exc
                 if runtime is not None:
                     raise
                 out = f"ERROR: {exc}\nFinal answer: A"
@@ -3176,6 +3223,7 @@ def _heuristic_poison_candidate(
     return None
 
 
+@budget.role_call("attack")
 def consolidate_attack_memory_from_seed(
     attack_capability: str,
     poison_payload: str,
@@ -4772,6 +4820,7 @@ def create_poison_memory(
     )
 
 
+@budget.role_call("attack")
 def consolidate_attack_memory_from_seed(
     attack_capability: str,
     poison_payload: str,

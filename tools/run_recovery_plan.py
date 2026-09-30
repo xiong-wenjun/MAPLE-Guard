@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = {"maple_guard.run_appworld", "maple_guard.run_mmlu",
            "maple_guard.run_longmemeval", "maple_guard.infa_memlink_eval"}
-OVERRIDES = {"--chat-timeout", "--pattern-judge-max-tokens", "--max-tokens", "--chat-max-tokens", "--full-judge-timeout", "--full-judge-max-tokens", "--answer-judge-max-tokens"}
+OVERRIDES = {"--response-budget-policy", "--chat-timeout", "--pattern-judge-max-tokens", "--max-tokens", "--chat-max-tokens", "--full-judge-timeout", "--full-judge-max-tokens", "--answer-judge-max-tokens"}
 
 def read(path):
     return json.loads(Path(path).read_text())
@@ -40,6 +40,8 @@ def flag(command, name, default=None):
 def rewrite_job(job, directory, source, overrides):
     if set(overrides) - OVERRIDES:
         raise ValueError("Recovery cannot override the method, data or experimental identity")
+    if "--response-budget-policy" in overrides and overrides["--response-budget-policy"] not in {"strict", "fail_task"}:
+        raise ValueError("Recovery response-budget-policy must be strict or fail_task")
     new = copy.deepcopy(job)
     old_dir, old_id = str(job["directory"]), job["run_id"]
     command = [x for x in job["command"] if x not in {"--resume-task-checkpoint", "--checkpoint-allow-budget-change"}]
@@ -74,7 +76,7 @@ def rewrite_job(job, directory, source, overrides):
         new["resolved_args"].update(task_checkpoint_dir=checkpoint_dir, resume_task_checkpoint=False,
                                     checkpoint_allow_budget_change=False)
         for name, value in overrides.items():
-            parsed = float(value) if name.endswith("timeout") else int(value)
+            parsed = str(value) if name == "--response-budget-policy" else float(value) if name.endswith("timeout") else int(value)
             new["resolved_args"][name[2:].replace("-", "_")] = parsed
     # Completion metadata belongs only to the original attempt.
     for name in ("pid", "exit_code", "finished_at", "completed_tasks", "api_usage", "started_at"):
@@ -138,7 +140,16 @@ def retryable_failure(directory):
     log = (directory/"run.log").read_text(errors="replace")[-12000:]
     records = events(directory)
     if any(x.get("invalid_for_benchmark") or "length" in x.get("finish_reasons", []) for x in records):
-        return False
+        # Allowed earlier task boundaries must not block recovery of a later
+        # transport failure. Unmatched/strict response failures remain fatal.
+        try:
+            rows = [json.loads(line) for line in (directory/"trace.jsonl").read_text().splitlines() if line.strip()]
+            from maple_guard.budget_outcomes import validate_committed_events
+            matched, _count, _pending = validate_committed_events(rows, records)
+        except (OSError, ValueError, TypeError):
+            return False
+        if not rows or not matched:
+            return False
     if any(x in log for x in ("AttributeError", "NameError", "AssertionError", "SyntaxError",
                               "JSONDecodeError", "No such file or directory")):
         return False
@@ -164,12 +175,28 @@ def validate_result(directory, exit_code, expected_count, expected_ids=None):
     calls = events(directory)
     invalid = sum(bool(x.get("invalid_for_benchmark")) or "length" in x.get("finish_reasons", []) for x in calls)
     errors = sum(bool(x.get("error_type")) or x.get("http_status", 0) >= 400 for x in calls)
+    summary_path = directory/"trace.summary.json"
+    try:
+        summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+    except (ValueError, OSError):
+        summary = {}
+    allowed = 0
+    pending = False
+    protocol_valid = True
+    budget_policy = summary.get("response_budget_policy") == "fail_task" and summary.get("budget_outcomes_version") == 1
+    if budget_policy:
+        from maple_guard.budget_outcomes import validate_committed_events
+        protocol_valid, allowed, pending = validate_committed_events(rows, calls)
     valid = (exit_code == 0 and not malformed and len(rows) == expected_count
-             and len(set(ids)) == expected_count and None not in ids and not invalid
+             and len(set(ids)) == expected_count and None not in ids and invalid == allowed and protocol_valid
              and (directory/"trace.summary.json").is_file()
              and (expected_ids is None or ids == expected_ids))
     return {"valid":valid, "completed_tasks":len(rows), "invalid_responses":invalid,
-            "transport_errors":errors, "task_order_verified":expected_ids is not None}
+            "transport_errors":errors, "task_order_verified":expected_ids is not None,
+            "accepted_budget_responses":allowed, "pending_evaluation":pending,
+            "metrics_valid":valid and not pending and (not budget_policy or summary.get("main_table_eligible") is True),
+            "accuracy_metrics_valid":valid and summary.get("accuracy_metrics_valid") is True if budget_policy else None,
+            "asr_metrics_valid":valid and summary.get("asr_metrics_valid") is True if budget_policy else None}
 
 def environment(command, credentials):
     import urllib.request

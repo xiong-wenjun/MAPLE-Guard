@@ -1,5 +1,6 @@
 """Runtime for matched lifecycle controls and source-based memory defenses."""
 from __future__ import annotations
+from maple_guard import budget_outcomes as budget
 import copy
 import hashlib
 import json
@@ -22,6 +23,7 @@ def model_clients(args):
         return request_json(base, path, body, key,
                             timeout=judge_timeout if path == "/chat/completions" else 120.0,
                             max_attempts=max_attempts)
+    @budget.role_call("defense")
     def judge(messages):
         base=getattr(args,"full_judge_base_url","") or getattr(args,"chat_base_url","")
         model=getattr(args,"full_judge_model","") or getattr(args,"chat_model","")
@@ -31,7 +33,9 @@ def model_clients(args):
         if getattr(args,"disable_chat_thinking",False):
             body["chat_template_kwargs"]={"enable_thinking":False}
         key=getattr(args,"full_judge_api_key","") or os.getenv("FULL_BASELINE_API_KEY","") or os.getenv("OPENAI_API_KEY","")
-        choice=request(base,"/chat/completions",body,key)["choices"][0]
+        data=request(base,"/chat/completions",body,key)
+        budget.handle_response(data, body, request_id=data.get("_maple_request_id"), endpoint=base.rstrip("/") + "/chat/completions", timeout=judge_timeout)
+        choice=data["choices"][0]
         if choice.get("finish_reason")=="length": raise RuntimeError("A-MemGuard judge output truncated")
         return choice["message"]["content"]
     def embed(text):
