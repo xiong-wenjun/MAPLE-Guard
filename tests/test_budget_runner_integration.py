@@ -161,11 +161,13 @@ class BudgetRunnerIntegrationTests(unittest.TestCase):
         args=self.args(run_longmemeval);args.answer_judge=True;args.answer_judge_base_url='http://judge/v1';args.answer_judge_model='judge';args.final_adjudicator=False
         task=self.task(openqa=True);memory=self.entry();memory.update_outcome=unittest.mock.Mock();cache={}
         with budget.task_scope(args,task.task_id,poison_texts={memory.memory_id:POISON}) as audit,patch.object(ep,'retrieve_for_agent',return_value=([memory],[],[])),patch('requests.post',side_effect=[reply(content='Final answer: uncertain but complete')]*6+[reply(content='{"correct":null}')]):
-            with self.assertRaises(BenchmarkResponseError):
-                run_longmemeval.run_openqa_task(task,args,{0:[memory]},[],None,{}, {},{},cache)
+            trace,*_=run_longmemeval.run_openqa_task(task,args,{0:[memory]},[],None,{}, {},{},cache)
+            self.assertIsNone(trace.is_correct)
         self.assertEqual(cache,{})
         memory.update_outcome.assert_not_called()
-        self.assertEqual(audit.pending,[])
+        self.assertEqual(len(audit.pending),1)
+        self.assertEqual(audit.pending[0]["status"],"pending_invalid_verdict_rescore")
+        self.assertTrue(audit.feedback_incomplete)
         self.assertEqual(audit.failures,[])
 
     def test_opt_in_pattern_judges_reject_nonboolean_and_ambiguous_verdicts(self):

@@ -86,22 +86,55 @@ def rewrite_job(job, directory, source, overrides):
                recovery_overrides=dict(overrides))
     return new
 
-def resume_job(job):
+def resume_job(job, evaluator_recovery=None):
     """Keep the same source, outputs and experimental identity; worker verifies hashes."""
     command = list(job["command"])
     checkpoint = flag(command, "--task-checkpoint-dir")
     if not checkpoint or not Path(checkpoint, "latest.json").is_file():
         return None
     entry = next(x for x in command if x.endswith("/tools/run_instrumented.py"))
-    if Path(entry).parents[1].resolve() != ROOT.resolve():
-        raise ValueError("Resume requires the same frozen source as the checkpoint")
+    source_transition = None
+    if Path(entry).parents[1].resolve() != ROOT.resolve() or evaluator_recovery:
+        if not evaluator_recovery or set(evaluator_recovery) != {'manifest','sha256'}:
+            raise ValueError("Resume requires the same frozen source or explicit evaluator recovery authorization")
+        from types import SimpleNamespace
+        from maple_guard import task_checkpoint as checkpoint_codec
+        try:
+            pointer = read(Path(checkpoint)/'latest.json')
+            name = pointer['generation']
+            import re
+            if not re.fullmatch(r'task-[0-9]{6,}-[0-9a-f]{32}',name):
+                raise ValueError('Invalid checkpoint pointer')
+            manifest_path = Path(checkpoint)/name/'manifest.json'
+            if manifest_path.is_symlink() or hashlib.sha256(manifest_path.read_bytes()).hexdigest() != pointer['manifest_sha256']:
+                raise ValueError('Checkpoint manifest integrity mismatch')
+            manifest = read(manifest_path)
+            saved = manifest['identity']
+            current = copy.deepcopy(saved)
+            current['source'] = checkpoint_codec.source_identity(ROOT)
+            options = SimpleNamespace(**checkpoint_codec._decode(saved['config']))
+            current['prompts'] = checkpoint_codec.prompt_identity(options)
+            options.resume_task_checkpoint = True
+            options.checkpoint_evaluator_recovery_manifest = evaluator_recovery['manifest']
+            options.checkpoint_evaluator_recovery_sha256 = evaluator_recovery['sha256']
+            source_transition = checkpoint_codec._evaluator_source_transition(saved,current,options,manifest['next_task_index'])
+        except (KeyError,OSError,checkpoint_codec.CheckpointError) as exc:
+            raise ValueError('Unapproved evaluator checkpoint source recovery') from exc
+        command[command.index(entry)] = str(ROOT/'tools/run_instrumented.py')
+        for option,key in (('--checkpoint-evaluator-recovery-manifest','manifest'),('--checkpoint-evaluator-recovery-sha256','sha256')):
+            if option in command:command[command.index(option)+1] = evaluator_recovery[key]
+            else:command += [option,evaluator_recovery[key]]
     result = copy.deepcopy(job)
     if "--resume-task-checkpoint" not in command:
         command.append("--resume-task-checkpoint")
     result.update(command=command, status="prepared", checkpoint_resume=True,
+                  evaluator_source_recovery=source_transition,
                   resume_count=int(job.get("resume_count", 0))+1)
     if isinstance(result.get("resolved_args"),dict):
         result["resolved_args"]["resume_task_checkpoint"] = True
+        if evaluator_recovery:
+            result["resolved_args"].update(checkpoint_evaluator_recovery_manifest=evaluator_recovery["manifest"],
+                checkpoint_evaluator_recovery_sha256=evaluator_recovery["sha256"])
     return result
 
 @contextlib.contextmanager
@@ -158,6 +191,19 @@ def retryable_failure(directory):
         "URLError", "model call failed", "judge failed", "TimeoutError", "timed out"))
     return recent_error and transport_reason
 
+def diagnosed_semantic_evaluator_failure(directory):
+    """Only the diagnosed external schema failure can bypass the transport-only retry gate."""
+    directory = Path(directory)
+    log = (directory/'run.log').read_text(errors='replace')[-12000:]
+    calls = events(directory)
+    if not calls or 'Malformed external evaluator verdict' not in log:
+        return False
+    last = calls[-1]
+    return (last.get('role') == 'evaluator' and last.get('http_status') == 200
+            and bool(last.get('finish_reasons')) and 'length' not in last['finish_reasons']
+            and not last.get('invalid_for_benchmark') and not last.get('error_type'))
+
+
 def validate_result(directory, exit_code, expected_count, expected_ids=None):
     directory = Path(directory)
     trace = directory/"trace.jsonl"
@@ -193,7 +239,9 @@ def validate_result(directory, exit_code, expected_count, expected_ids=None):
              and (expected_ids is None or ids == expected_ids))
     return {"valid":valid, "completed_tasks":len(rows), "invalid_responses":invalid,
             "transport_errors":errors, "task_order_verified":expected_ids is not None,
-            "accepted_budget_responses":allowed, "pending_evaluation":pending,
+            "accepted_budget_responses":allowed, "pending_evaluation":summary.get("pending_evaluation",pending),
+            "pending_correctness_evaluation":pending,
+            "pending_auxiliary_evaluation":summary.get("pending_auxiliary_evaluation",False),
             "metrics_valid":valid and not pending and (not budget_policy or summary.get("main_table_eligible") is True),
             "accuracy_metrics_valid":valid and summary.get("accuracy_metrics_valid") is True if budget_policy else None,
             "asr_metrics_valid":valid and summary.get("asr_metrics_valid") is True if budget_policy else None}
@@ -303,9 +351,12 @@ def run_lane(plan, lane):
                     previous = previous or original["directory"]
                     if previous and Path(previous,"run.json").is_file():
                         prior = read(Path(previous)/"run.json")
-                        candidate = resume_job(prior)
+                        candidate = resume_job(prior,evaluator_recovery=lane.get("evaluator_recovery"))
+                        if lane.get("evaluator_recovery") and candidate is None:
+                            raise ValueError("Evaluator recovery requires the existing checkpoint; task replay is forbidden")
                         if candidate is not None:
-                            if prior.get("status") not in {"running","prepared"} and not retryable_failure(previous):
+                            if (prior.get("status") not in {"running","prepared"} and not retryable_failure(previous)
+                                    and not (candidate.get("evaluator_source_recovery") and diagnosed_semantic_evaluator_failure(previous))):
                                 raise RuntimeError("Checkpoint retained; diagnose deterministic failure before resuming: "+previous)
                             for option,value in lane.get("overrides", {}).items():
                                 if str(flag(candidate["command"],option)) != str(value):

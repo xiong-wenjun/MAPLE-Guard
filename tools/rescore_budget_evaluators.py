@@ -40,8 +40,9 @@ def _pending(trace):
         row=json.loads(line)
         for event in row.get('pending_evaluators',[]):
             key=(event.get('task_id'),event.get('request_id'))
-            if (event.get('role')!='evaluator' or event.get('invalid_response_type')!='length'
-                    or event.get('status')!='pending_budget_rescore' or not all(key)
+            if (event.get('role')!='evaluator' or (event.get('invalid_response_type'),event.get('status')) not in {
+                        ('length','pending_budget_rescore'),
+                        ('invalid_evaluator_verdict','pending_invalid_verdict_rescore')} or not all(key)
                     or key in seen or event.get('task_id')!=row.get('task_id',row.get('sample_id'))
                     or event.get('result_key') not in {'correct','imitates'}):
                 raise ValueError('Invalid or duplicate saved evaluator request')
@@ -78,8 +79,9 @@ def rescore_requests(trace, output, *, max_tokens, max_attempts=3):
         allowed={'model','messages','temperature','max_tokens','stop','response_format','chat_template_kwargs'}
         if set(original)-allowed or not isinstance(original.get('messages'),list):
             raise ValueError('Unsafe or malformed saved evaluator payload')
-        if max_tokens<=int(original.get('max_tokens',0)):
-            raise ValueError('Rescore cap must exceed the saved evaluator budget')
+        original_cap=int(original.get('max_tokens',0))
+        if max_tokens < original_cap or (event['invalid_response_type']=='length' and max_tokens == original_cap):
+            raise ValueError('Length rescore cap must exceed the saved budget; semantic rescore may keep it')
         key=(event['task_id'],event['request_id'])
         digest=_digest(original)
         if key in completed:
