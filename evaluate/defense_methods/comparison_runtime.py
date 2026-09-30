@@ -276,9 +276,22 @@ class ComparisonRuntime:
             for entry in records:bank[str(entry.memory_id)]=entry
         return {i:list(records) for i,records in selected.items()}
 
+    @staticmethod
+    def _distinct_labels(labels):
+        # ACL intersection and source/taint union are idempotent. Routing a
+        # cycle must not enumerate every path through the communication graph.
+        result, seen = [], set()
+        for label in labels:
+            key = json.dumps(label, sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                result.append(copy.deepcopy(label))
+        return result
+
     def route(self,text,sender,recipient):
         labels=[self._label(m) for m in self.consumed.get(sender,{}).values()]
-        labels.extend(copy.deepcopy(self.received.get(sender,[])))
+        labels.extend(self.received.get(sender,[]))
+        labels=self._distinct_labels(labels)
         if self.method=="provenance_acl":
             for label in labels:
                 allowed,details=self.rules.decide(label,"transfer",actor=sender,recipients=[recipient])
@@ -290,7 +303,7 @@ class ComparisonRuntime:
             allowed,decision=self._pi(SimpleNamespace(intent="",experience=text,memory_id="communication"),sender,"piguard_transfer")
             self.pending.append(decision)
             if not allowed:return None
-        self.received.setdefault(recipient,[]).extend(copy.deepcopy(labels))
+        self.received[recipient]=self._distinct_labels([*self.received.get(recipient,[]),*labels])
         return text
 
     def peer_context(self,outputs,adjacency,recipient):

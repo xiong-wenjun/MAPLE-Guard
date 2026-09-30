@@ -120,7 +120,7 @@ does not depend on that broken script import.
 There is one deliberate operational failure-policy strengthening: upstream
 malformed audit JSON marks all records inconsistent and continues, potentially
 annotating every record. Here malformed/missing/duplicate IDs, non-boolean fields,
-invalid paths, and provider failures raise `AMemGuardOutputError` with
+empty/error provider text, and provider failures raise `AMemGuardOutputError` with
 `fallback_policy="reject_all"`. The experiment stops, no retained records are
 returned and no lessons are created from that failed audit. This preserves the
 source's rejection direction while preventing infrastructure errors from silently
@@ -169,3 +169,16 @@ A source-fidelity review added regressions for the unconditional cold-start
 warning and whitespace-only intent state round-tripping; both were observed
 failing before their fixes. Final component result: **17 tests passed**. A successful unit suite is not a live
 model smoke or a benchmark result; no benchmark performance is claimed here.
+
+## September 30 recovery correction
+
+The host previously imposed an extra literal ASCII-arrow check on complete
+reasoning text. The released checker has no such gate: it forwards the generated
+text unchanged to the joint LLM auditor. The adapter now does the same for
+nonempty, non-error text, including Unicode arrows and prose. The complete joint
+audit schema and truncation checks remain mandatory. This correction changes no
+source prompts, lessons, thresholds, candidate selection, or audit decisions.
+
+Recovery attempts may use a documented 8192-token judge budget after observed
+4096-token truncation. This is a host budget variant, not evidence of an author
+setting. Preserve and report it separately from earlier attempts.

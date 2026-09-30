@@ -91,3 +91,20 @@ class RecoveryPlanTests(unittest.TestCase):
         new=rewrite_job(job,Path("/fresh/retry"),Path("/new/source"),{"--chat-max-tokens":"1024"})
         args=new["command"]
         self.assertEqual(args[args.index("--chat-max-tokens")+1],"1024")
+
+    def test_audited_full_judge_budget_does_not_change_protocol_identity(self):
+        job=self.job()
+        job["method"]="amemguard_full"
+        new=rewrite_job(job,Path("/fresh/retry"),Path("/new/source"),{"--full-judge-max-tokens":"8192"})
+        command=new["command"]
+        self.assertEqual(command[command.index("--full-judge-max-tokens")+1],"8192")
+        self.assertEqual(new["method"],"amemguard_full")
+        self.assertEqual(new["recovery_overrides"],{"--full-judge-max-tokens":"8192"})
+
+    def test_recorded_resolved_budget_matches_restarted_command(self):
+        job=self.job();job["resolved_args"]={"full_judge_max_tokens":4096,"chat_timeout":180}
+        new=rewrite_job(job,Path("/fresh/retry"),Path("/new/source"),
+                        {"--full-judge-max-tokens":"8192","--chat-timeout":"600"})
+        self.assertEqual(new["resolved_args"]["full_judge_max_tokens"],8192)
+        self.assertEqual(new["resolved_args"]["chat_timeout"],600.0)
+        self.assertEqual(job["resolved_args"]["full_judge_max_tokens"],4096)
