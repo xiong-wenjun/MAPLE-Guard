@@ -19,6 +19,8 @@ if __package__:
 else:  # Direct script execution from maple_guard/.
     from providers.base import BaseEmbedder, BaseLLM
 
+from maple_guard.outcome_feedback import policy_from_args
+
 _MEMRL_IMPORT_ERROR: Optional[BaseException] = None
 try:
     if __package__:
@@ -543,6 +545,8 @@ class MemRLMemoryBackend:
         return out
 
     def update_value(self, entry: Any, success: bool) -> None:
+        if policy_from_args(self.args) != "full":
+            return
         maple_guard_id = str(getattr(entry, "memory_id", ""))
         backend_id = self.backend_ids.get(maple_guard_id) or getattr(entry, "backend_memory_id", None)
         if not backend_id:
@@ -684,6 +688,8 @@ class MemoryBackendBundle:
         return self.shared_backend.retrieve_entries(query, top_k=top_k, threshold=threshold, method=method, agent_id=agent_id, task_class=task_class)
 
     def update_value(self, entry: Any, success: bool) -> None:
+        if policy_from_args(self.args) != "full":
+            return
         store_id = getattr(entry, "backend_store_id", None)
         stores = [*self.private_backends.values(), self.shared_backend, self.quarantine_backend]
         if store_id is not None:
