@@ -110,7 +110,7 @@ def experiment_identity(args, method=None):
     """Configuration identity; task transitions preserve state, new runs do not."""
     names = {"seed","trace_id","memory_run_id","agents","memory_topology","communication_topology",
              "peer_communication","strict_comparison","chat_base_url","chat_model","embed_base_url",
-             "embed_model","full_judge_base_url","full_judge_model","top_k_memory","min_retrieval_score"}
+             "embed_model","full_judge_base_url","full_judge_model","top_k_memory","min_retrieval_score","outcome_feedback_policy"}
     values = {k:v for k,v in public_config(args).items()
               if k in names or k.startswith(("baseline_","amemguard_","piguard_","agentsafe_","infa_","agentxposed_",
                                              "official_defense_","safeguard_"))}

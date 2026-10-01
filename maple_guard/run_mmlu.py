@@ -147,6 +147,7 @@ class StreamTaskRecord:
     defense_decisions: List[Dict[str, Any]] = field(default_factory=list)
     task_trace: Dict[str, Any] = field(default_factory=dict)
     memory_inventory: Dict[str, Any] = field(default_factory=dict)
+    outcome_feedback_policy: str = "full"
 
 
 def load_yaml_config(path: str) -> Dict[str, Any]:
@@ -311,6 +312,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-every", type=int, default=int(cfg_get(cfg, "experiment.log_every", 5)))
     p.add_argument("--seed", type=int, default=int(cfg_get(cfg, "experiment.seed", 42)))
     ep.add_full_baseline_args(p, cfg)
+    from maple_guard.outcome_feedback import add_feedback_args
+    add_feedback_args(p, cfg)
     from maple_guard.task_checkpoint import add_checkpoint_args
     add_checkpoint_args(p)
     args = p.parse_args()
@@ -341,6 +344,8 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
         elif getattr(args, "defense_enabled", None) is False:
             args.method = ep.METHOD_NO_DEFENSE_MEMRL
     args.method = ep.normalize_method(args.method)
+    from maple_guard.outcome_feedback import validate_ablation
+    validate_ablation(args)
     os.environ["CHAT_DISABLE_THINKING"] = "1" if getattr(args, "disable_chat_thinking", False) else "0"
     apply_attack_surface(args)
     args.attack_stealth_mode = ep.normalize_attack_stealth_mode(getattr(args, "attack_stealth_mode", ep.STEALTH_METADATA_CLEAN))
@@ -1018,6 +1023,8 @@ def attack_source_trust(args: argparse.Namespace, attack_capability: str, agent_
 
 
 def update_agent_trust(agent_trust: Dict[int, float], record: StreamTaskRecord, args: argparse.Namespace) -> None:
+    if ep.policy_from_args(args) == "none":
+        return
     # Lightweight deployment-level reputation. This intentionally avoids using
     # experiment-only attacker identities or poisoning schedules as a trust
     # shortcut.
@@ -1108,7 +1115,7 @@ def maybe_promote_benign_to_shared(
     # oracle success for backward-compatible clean promotion; accepted_* policies
     # model deployment promotion without access to hidden ground truth.
     policy = str(getattr(args, "benign_shared_promotion_policy", PROMOTION_SUCCESS_ONLY) or PROMOTION_SUCCESS_ONLY)
-    if policy != PROMOTION_ACCEPTED_RETRIEVED_PRIVATE and not success:
+    if ep.policy_from_args(args) != "none" and policy != PROMOTION_ACCEPTED_RETRIEVED_PRIVATE and not success:
         return [], []
     rate = 1.0 if getattr(args, "promote_benign_to_shared", False) else float(getattr(args, "benign_shared_promotion_rate", 0.0) or 0.0)
     if rate <= 0:
@@ -1584,6 +1591,7 @@ def run_stream_task(
             agent_outputs=final_round_outputs,
             attacker_ids=getattr(args, "attacker_ids", [args.attacker_id]),
             attacker_self_memory=bool(getattr(args, "attacker_self_memory", False)),
+            feedback_policy=ep.policy_from_args(args),
         ))
     promotion_defense, benign_shared_promoted_ids = maybe_promote_benign_to_shared(
         observed_task,
@@ -1750,6 +1758,7 @@ def run_stream_task(
         defense_decisions=[asdict(d) for d in all_defense],
         task_trace=asdict(task_trace),
         memory_inventory=ep.memory_inventory(private_memories, shared_memories, memory_backend),
+        outcome_feedback_policy=ep.policy_from_args(args),
     )
 
 
@@ -2337,6 +2346,7 @@ def run_stream(args) -> None:
 
     summary = summarize_stream(records, args, poison_indices, poisoned_memory_targets, private_memories, shared_memories, memory_backend, agent_trust)
     from maple_guard.task_checkpoint import checkpoint_summary
+    summary["outcome_feedback_policy"] = ep.policy_from_args(args)
     summary["task_checkpoint"] = checkpoint_summary(args)
     summary["baseline_provenance"] = ep.baseline_run_provenance(args)
     text_memory_dir = dump_text_memory(args, private_memories, shared_memories, memory_backend, summary)

@@ -63,6 +63,8 @@ from evaluate.defense_methods.full_runtime import (
     FULL_METHODS, current_runtime, scoped_baseline, add_full_baseline_args, peer_context, strict_runtime_active, current_runtime_active, baseline_run_provenance,
 )
 
+from maple_guard.outcome_feedback import policy_from_args, validate_policy
+
 ATTACK_CAP_DMI = "dmi"
 ATTACK_CAP_CAMI = "cami"
 ATTACK_CAP_QMI = "qmi"
@@ -292,9 +294,10 @@ class MemoryEntry:
     failure_count: int = 0
     last_used: Optional[float] = None
 
-    def update_outcome(self, success: bool, alpha: float = 0.2) -> None:
+    def update_outcome(self, success: bool, alpha: float = 0.2, *, update_q: bool = True) -> None:
         reward = 1.0 if success else -1.0
-        self.utility_q = (1.0 - alpha) * self.utility_q + alpha * reward
+        if update_q:
+            self.utility_q = (1.0 - alpha) * self.utility_q + alpha * reward
         if success:
             self.success_count += 1
             self.provenance_trust = min(1.0, self.provenance_trust + 0.03)
@@ -1776,9 +1779,21 @@ def create_benign_memory(
     success: bool,
     phase: str,
     agent_output: Optional[str] = None,
+    feedback_policy: str = "full",
 ) -> MemoryEntry:
     task_class = infer_task_class(task)
-    if agent_output is not None:
+    validate_policy(feedback_policy)
+    if feedback_policy == "none":
+        # Store observed behavior without ever reading the reference answer.
+        observed = compact_dialogue_for_memory(str(agent_output), 900) if agent_output is not None else f"The team selected {final_answer}."
+        experience = (
+            f"In task {task.task_id}, Agent {agent_id} observed this task experience: {observed} "
+            "External correctness feedback was unavailable. This is unverified self-history."
+        )
+        utility_q, provenance_trust, content_hazard = 0.0, 0.5, 0.15
+        taint = TAINT_UNVERIFIED
+        source_type, memory_type = "agent_self_unverified_consolidation", "agent_unverified_experience"
+    elif agent_output is not None:
         compact_output = compact_dialogue_for_memory(agent_output, 900) if "compact_dialogue_for_memory" in globals() else str(agent_output)[:900]
         agent_answer = extract_choice(agent_output, default=str(final_answer or ""))
         agent_success = bool(agent_answer and agent_answer == task.answer)
@@ -1841,6 +1856,7 @@ def consolidate_benign_memories(
     agent_outputs: Optional[Dict[int, str]] = None,
     attacker_ids: Optional[Sequence[int]] = None,
     attacker_self_memory: bool = True,
+    feedback_policy: str = "full",
 ) -> List[DefenseDecision]:
     decisions: List[DefenseDecision] = []
     attacker_set = set(int(x) for x in (attacker_ids or []))
@@ -1850,11 +1866,11 @@ def consolidate_benign_memories(
         output = None
         if isinstance(agent_outputs, dict):
             output = agent_outputs.get(agent_id, agent_outputs.get(str(agent_id)))
-        m = create_benign_memory(task, agent_id, final_answer, success, phase, agent_output=output)
+        m = create_benign_memory(task, agent_id, final_answer, success, phase, agent_output=output, feedback_policy=feedback_policy)
         written, ds = commit_memory(m, "private", agent_id, method, private_memories, shared_memories, memory_backend, ingress_channel='agent_output')
         decisions.extend(ds)
         if written and promote_benign_to_shared and agent_id == 0:
-            team_entry = create_benign_memory(task, agent_id, final_answer, success, f"{phase}_team", agent_output=output)
+            team_entry = create_benign_memory(task, agent_id, final_answer, success, f"{phase}_team", agent_output=output, feedback_policy=feedback_policy)
             team_entry.allowed_agents = list(range(num_agents))
             team_entry.provenance_trust = max(team_entry.provenance_trust, 0.8)
             _ok, ds2 = commit_memory(team_entry, "team", agent_id, method, private_memories, shared_memories, memory_backend, ingress_channel='agent_output')
@@ -3080,13 +3096,14 @@ def run_task(
         final_answer = strict_majority_vote(last_round_outputs, task.choices)
         all_agent_final_answer = final_answer
     success = final_answer == task.answer
-    if not getattr(args, "_disable_memory_update", False):
+    feedback_policy = policy_from_args(args)
+    if not getattr(args, "_disable_memory_update", False) and feedback_policy != "none":
         for memories in selected_by_agent.values():
             for m in memories:
-                m.update_outcome(success)
+                m.update_outcome(success, update_q=feedback_policy == "full")
                 if runtime is None or not hasattr(runtime, "record_feedback"):
                     derive_provenance_scores(m)
-                if memory_backend is not None:
+                if memory_backend is not None and feedback_policy == "full":
                     memory_backend.update_value(m, success)
                 if runtime is not None and hasattr(runtime, "record_feedback"):
                     runtime.record_feedback(m)
